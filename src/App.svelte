@@ -11,7 +11,7 @@
   const EVENT_TIME = 31923;
   const DEFAULT_HEADER = 'Featured event';
   const NO_ACCESS_TEXT = 'Request access to create calendar events in order to use this plugin';
-  const STORAGE_PREFIX = 'bubdabit-calendar-widget:config:';
+  const STORAGE_PREFIX = 'budabit-calendar-widget:config:';
 
   type WidgetConfig = {
     header: string;

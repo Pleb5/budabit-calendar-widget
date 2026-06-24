@@ -36,8 +36,8 @@ pnpm check
 The widget also includes manifest helper scripts for standalone kind `30033` event generation:
 
 ```bash
-WIDGET_APP_URL="https://cdn.example.com/bubdabit-calendar-widget/index.html" pnpm manifest:after
-WIDGET_APP_URL="https://cdn.example.com/bubdabit-calendar-widget/index.html" pnpm manifest:before
+WIDGET_APP_URL="https://cdn.example.com/budabit-calendar-widget/index.html" pnpm manifest:after
+WIDGET_APP_URL="https://cdn.example.com/budabit-calendar-widget/index.html" pnpm manifest:before
 ```
 
 These scripts generate manifests for the below-quicklinks and above-quicklinks slots respectively.
