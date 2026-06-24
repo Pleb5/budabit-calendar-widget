@@ -3,15 +3,17 @@
 The widget is designed for BudaBit's community widget publisher.
 
 - Default header: `Featured event`
-- Query permission: `community:queryTargetEvents`
+- Query permission: `community:queryEvents`
+- Capability permission: `community:checkWriteCapabilities`
 - Optional toast permission: `ui:toast`
 - Supported slots: `community-home-before-quicklinks`, `community-home-after-quicklinks`
 
 Configuration is intentionally based on generic community context:
 
-- Use `communityContext.writeTargets.calendar.canWrite` and `communityContext.writeTargets.calendarDate.canWrite` for configuration access.
+- Use `community:checkWriteCapabilities` with descriptors `{kind: 31923}` and `{kind: 31922}` for configuration access.
 - Do not expect a host-provided `canCreateCalendarEvents` boolean.
-- Do not hard-code community section names. The host maps logical targets to renamed sections before querying.
+- Do not hard-code community section names. The host maps descriptors to active community sections before checking grants or querying.
+- Refetch capabilities/events on `community:contextChanged` and ignore stale responses whose `contextSessionId` / `contextVersion` no longer match the current context.
 
 For a community-wide featured event, publish the widget with an app URL containing:
 

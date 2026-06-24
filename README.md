@@ -6,8 +6,9 @@ Inline BudaBit Smart Widget for featuring one already-published community calend
 
 - Renders in `community-home-before-quicklinks` or `community-home-after-quicklinks`.
 - Reads generic `communityContext` from BudaBit.
-- Queries events with `community:queryTargetEvents` for logical targets `calendar` and `calendarDate`.
-- Derives configuration access from `communityContext.writeTargets.calendar.canWrite` or `communityContext.writeTargets.calendarDate.canWrite`.
+- Queries events with `community:queryEvents` for descriptors `{kind: 31923}` and `{kind: 31922}`.
+- Derives configuration access from `community:checkWriteCapabilities` for those descriptors.
+- Reacts to `community:contextChanged` and ignores stale responses whose context version no longer matches.
 - Shows the selected event to all viewers when the app URL includes `?event=...`.
 - Gates only configuration controls. If there is no configured event and the viewer cannot write calendar events, it displays: `Request access to create calendar events in order to use this plugin`.
 

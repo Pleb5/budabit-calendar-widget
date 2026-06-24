@@ -1,7 +1,9 @@
 <script lang="ts">
   import {
     createWidgetBridge,
+    type CommunityEventDescriptor,
     type CommunityWidgetContext,
+    type CommunityWriteCapability,
     type NostrEvent,
     type WidgetBridge,
     type WidgetInitPayload,
@@ -9,6 +11,7 @@
 
   const EVENT_DATE = 31922;
   const EVENT_TIME = 31923;
+  const CALENDAR_DESCRIPTORS: CommunityEventDescriptor[] = [{kind: EVENT_TIME}, {kind: EVENT_DATE}];
   const DEFAULT_HEADER = 'Featured event';
   const NO_ACCESS_TEXT = 'Request access to create calendar events in order to use this plugin';
   const STORAGE_PREFIX = 'budabit-calendar-widget:config:';
@@ -43,20 +46,13 @@
   let status = $state('Waiting for BudaBit community context...');
   let error = $state('');
   let loadingEvents = $state(false);
+  let calendarCapabilities = $state<CommunityWriteCapability[]>([]);
 
-  const canConfigure = $derived(
-    Boolean(
-      communityContext?.writeTargets.calendar?.canWrite ||
-        communityContext?.writeTargets.calendarDate?.canWrite
-    )
-  );
+  const canConfigure = $derived(calendarCapabilities.some((capability) => capability.canWrite));
 
   const calendarSectionNames = $derived(
     Array.from(
-      new Set([
-        ...(communityContext?.writeTargets.calendar?.sectionNames ?? []),
-        ...(communityContext?.writeTargets.calendarDate?.sectionNames ?? []),
-      ])
+      new Set(calendarCapabilities.flatMap((capability) => capability.sectionNames))
     )
   );
 
@@ -154,16 +150,51 @@
 
   const getEventSummary = (event: NostrEvent) => event.content.trim();
 
-  async function loadCalendarEvents() {
-    if (!bridge || !communityContext) return;
+  const getCommunityContextKey = (ctx: CommunityWidgetContext | null) =>
+    ctx ? `${ctx.contextSessionId}:${ctx.contextVersion}` : '';
 
+  const responseMatchesContext = (
+    response: {contextSessionId?: string; contextVersion?: number},
+    expectedContext: CommunityWidgetContext
+  ) =>
+    response.contextSessionId === expectedContext.contextSessionId &&
+    response.contextVersion === expectedContext.contextVersion;
+
+  async function refreshCalendarCapabilities(ctx = communityContext) {
+    if (!bridge || !ctx) return;
+
+    const expectedContext = ctx;
+
+    try {
+      const res = await bridge.request('community:checkWriteCapabilities', {
+        descriptors: CALENDAR_DESCRIPTORS,
+      });
+
+      if ('error' in res) {
+        error = res.error;
+        status = 'Unable to check calendar configuration access.';
+        return;
+      }
+
+      if (!responseMatchesContext(res, expectedContext)) return;
+      calendarCapabilities = res.capabilities;
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+      status = 'Unable to check calendar configuration access.';
+    }
+  }
+
+  async function loadCalendarEvents(ctx = communityContext) {
+    if (!bridge || !ctx) return;
+
+    const expectedContext = ctx;
     loadingEvents = true;
     error = '';
     status = 'Loading community calendar events...';
 
     try {
-      const res = await bridge.request('community:queryTargetEvents', {
-        targetIds: ['calendar', 'calendarDate'],
+      const res = await bridge.request('community:queryEvents', {
+        descriptors: CALENDAR_DESCRIPTORS,
         limit: 100,
       });
 
@@ -173,6 +204,7 @@
         return;
       }
 
+      if (!responseMatchesContext(res, expectedContext)) return;
       events = res.events.filter((event) => event.kind === EVENT_TIME || event.kind === EVENT_DATE);
       status = events.length ? `Loaded ${events.length} calendar event(s).` : 'No events found.';
     } catch (err) {
@@ -202,6 +234,20 @@
     }
   }
 
+  function applyCommunityContext(nextContext: CommunityWidgetContext | null) {
+    communityContext = nextContext;
+    calendarCapabilities = [];
+
+    if (communityContext && !hasUrlConfig) {
+      const localConfig = readLocalConfig(communityContext);
+      if (localConfig) {
+        config = localConfig;
+        headerInput = localConfig.header;
+        selectedEventRef = localConfig.eventRef;
+      }
+    }
+  }
+
   $effect(() => {
     const b = createWidgetBridge({
       targetWindow: window.parent,
@@ -213,27 +259,30 @@
 
     const offInit = b.onEvent('widget:init', (payload) => {
       initPayload = payload;
-      communityContext = payload.communityContext ?? null;
-
-      if (communityContext && !hasUrlConfig) {
-        const localConfig = readLocalConfig(communityContext);
-        if (localConfig) {
-          config = localConfig;
-          headerInput = localConfig.header;
-          selectedEventRef = localConfig.eventRef;
-        }
-      }
+      applyCommunityContext(payload.communityContext ?? null);
 
       status = communityContext
-        ? 'Connected to community context.'
+        ? `Connected to community context ${getCommunityContextKey(communityContext)}.`
         : 'Waiting for BudaBit community context...';
-      void loadCalendarEvents();
+      void refreshCalendarCapabilities(communityContext);
+      void loadCalendarEvents(communityContext);
+    });
+
+    const offCommunityChanged = b.onEvent('community:contextChanged', (payload) => {
+      applyCommunityContext(payload.communityContext ?? null);
+
+      status = communityContext
+        ? `Community context updated to ${getCommunityContextKey(communityContext)}.`
+        : 'Waiting for BudaBit community context...';
+      void refreshCalendarCapabilities(communityContext);
+      void loadCalendarEvents(communityContext);
     });
 
     b.signalReady();
 
     return () => {
       offInit();
+      offCommunityChanged();
       b.destroy();
       bridge = null;
     };
@@ -286,7 +335,7 @@
               {calendarSectionNames.join(', ') || 'the community calendar section'}.
             </p>
           </div>
-          <button type="button" onclick={loadCalendarEvents} disabled={loadingEvents}>
+          <button type="button" onclick={() => loadCalendarEvents()} disabled={loadingEvents}>
             {loadingEvents ? 'Loading...' : 'Refresh'}
           </button>
         </div>
