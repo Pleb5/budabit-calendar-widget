@@ -1,0 +1,26 @@
+{
+  "name": "bubdabit-calendar-widget",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BudaBit inline widget for featuring a community calendar event",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "vite build",
+    "typecheck": "svelte-check --tsconfig ./tsconfig.json",
+    "check": "pnpm typecheck && pnpm build",
+    "manifest:after": "budabit-generate --title 'Featured Calendar Event' --type tool --app-url '${WIDGET_APP_URL:-https://example.com/bubdabit-calendar-widget/index.html}' --icon 'https://example.com/bubdabit-calendar-widget/icon.png' --image 'https://example.com/bubdabit-calendar-widget/preview.png' --identifier 'featured-calendar-event' --version '0.1.0' --changelog 'Initial local build' --permissions 'community:queryTargetEvents,ui:toast' --slot-type 'community-home-after-quicklinks' --slot-label 'Featured event' --output 'dist/widget-after'",
+    "manifest:before": "budabit-generate --title 'Featured Calendar Event' --type tool --app-url '${WIDGET_APP_URL:-https://example.com/bubdabit-calendar-widget/index.html}' --icon 'https://example.com/bubdabit-calendar-widget/icon.png' --image 'https://example.com/bubdabit-calendar-widget/preview.png' --identifier 'featured-calendar-event' --version '0.1.0' --changelog 'Initial local build' --permissions 'community:queryTargetEvents,ui:toast' --slot-type 'community-home-before-quicklinks' --slot-label 'Featured event' --output 'dist/widget-before'"
+  },
+  "dependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.3",
+    "budabit-sdk": "file:../budabit/packages/flotilla-extension-template/packages/sdk",
+    "svelte": "^5.39.12",
+    "vite": "^6.3.6"
+  },
+  "devDependencies": {
+    "@tsconfig/svelte": "^5.0.4",
+    "svelte-check": "^4.1.4",
+    "typescript": "^5.7.2"
+  }
+}
