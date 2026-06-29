@@ -1,17 +1,17 @@
-# Featured Calendar Event Widget
+# Featured Calendar Events Widget
 
-Inline BudaBit Smart Widget for featuring one already-published community calendar event on the community home page.
+Inline BudaBit Smart Widget for featuring one or more already-published community calendar events on the community home page.
 
 ## Behavior
 
 - Renders in `community-home-before-quicklinks` or `community-home-after-quicklinks`.
 - Reads generic `communityContext` from BudaBit.
 - Queries events with `community:queryEvents` for descriptors `{kind: 31923}` and `{kind: 31922}`.
-- Loads the current community-wide featured event with `community:querySharedConfig`.
-- Saves community-wide featured event config with `community:publishSharedConfig`; latest valid moderator-authored config wins.
+- Loads the current community-wide featured events with `community:querySharedConfig`.
+- Saves community-wide featured events config with `community:publishSharedConfig`; latest valid moderator-authored config wins.
 - Derives event publishing access and section moderator access separately with `community:checkWriteCapabilities` for those descriptors.
 - Reacts to `community:contextChanged` and ignores stale responses whose context version no longer matches.
-- Shows the selected event to all viewers.
+- Shows all selected events to all viewers.
 - Gates only Edit/Configure controls to moderators of either time-based or date-based calendar event descriptors.
 
 ## Local Development

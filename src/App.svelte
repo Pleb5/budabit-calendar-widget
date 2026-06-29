@@ -15,31 +15,38 @@
   const CALENDAR_DESCRIPTORS: CommunityEventDescriptor[] = [{kind: EVENT_TIME}, {kind: EVENT_DATE}];
   const CONFIG_NAMESPACE = 'budabit-calendar-widget';
   const CONFIG_KEY = 'featured-calendar-event';
-  const DEFAULT_HEADER = 'Featured event';
-  const NO_CONFIG_TEXT = 'No featured event has been configured for this community yet.';
+  const DEFAULT_HEADER = 'Featured events';
+  const NO_CONFIG_TEXT = 'No featured events have been configured for this community yet.';
   const SUMMARY_MAX_LENGTH = 200;
 
   type WidgetTheme = 'light' | 'dark';
 
   type WidgetConfig = {
     header: string;
-    eventRef: string;
+    eventRefs: string[];
   };
 
   const tagValue = (event: Pick<NostrEvent, 'tags'>, name: string) =>
     event.tags.find((tag) => tag[0] === name)?.[1] || '';
+
+  const normalizeEventRefs = (refs: unknown) =>
+    Array.isArray(refs)
+      ? Array.from(
+          new Set(refs.map((ref) => (typeof ref === 'string' ? ref.trim() : '')).filter(Boolean))
+        )
+      : [];
 
   const readUrlConfig = (): WidgetConfig => {
     const params = new URLSearchParams(window.location.search);
 
     return {
       header: params.get('header')?.trim() || DEFAULT_HEADER,
-      eventRef: params.get('event')?.trim() || params.get('eventRef')?.trim() || '',
+      eventRefs: normalizeEventRefs(params.getAll('event')),
     };
   };
 
   const initialUrlConfig = readUrlConfig();
-  const hasUrlConfig = Boolean(initialUrlConfig.eventRef);
+  const hasUrlConfig = Boolean(initialUrlConfig.eventRefs.length);
 
   let bridge = $state<WidgetBridge | null>(null);
   let initPayload = $state<WidgetInitPayload | null>(null);
@@ -47,7 +54,7 @@
   let events = $state<NostrEvent[]>([]);
   let config = $state<WidgetConfig>(initialUrlConfig);
   let headerInput = $state(initialUrlConfig.header);
-  let selectedEventRef = $state(initialUrlConfig.eventRef);
+  let selectedEventRefs = $state<string[]>(initialUrlConfig.eventRefs);
   let status = $state('Waiting for BudaBit community context...');
   let error = $state('');
   let loadingConfig = $state(false);
@@ -56,7 +63,10 @@
   let editing = $state(false);
   let calendarCapabilities = $state<CommunityWriteCapability[]>([]);
   let widgetTheme = $state<WidgetTheme>('light');
+  let mainElement = $state<HTMLElement | null>(null);
   let configPanelElement = $state<HTMLElement | null>(null);
+  let resizeFrame: number | undefined;
+  let lastRequestedHeight = 0;
 
   const canConfigure = $derived(calendarCapabilities.some((capability) => capability.canModerate));
 
@@ -66,36 +76,55 @@
     return identifier ? `${event.kind}:${event.pubkey}:${identifier}` : '';
   };
 
-  const eventRefs = (event: NostrEvent) =>
+  const getEventConfigRef = (event: NostrEvent) => calendarEventAddress(event) || event.id;
+
+  const getEventRefs = (event: NostrEvent) =>
     [calendarEventAddress(event), tagValue(event, 'd'), event.id].filter(Boolean);
 
   const matchesEventRef = (event: NostrEvent, ref: string) =>
-    Boolean(ref && eventRefs(event).includes(ref));
-
-  const selectedEvent = $derived.by(() => events.find((event) => matchesEventRef(event, config.eventRef)));
+    Boolean(ref && getEventRefs(event).includes(ref));
 
   const sortedEvents = $derived.by(() =>
     [...events].sort((a, b) => (getEventStart(a) || 0) - (getEventStart(b) || 0))
+  );
+
+  const selectedEvents = $derived.by(() =>
+    sortedEvents.filter((event) => config.eventRefs.some((ref) => matchesEventRef(event, ref)))
   );
 
   const normalizeWidgetConfig = (value: unknown): WidgetConfig | null => {
     if (!value || typeof value !== 'object') return null;
 
     const partial = value as Partial<WidgetConfig>;
-    const eventRef = partial.eventRef?.trim();
-    if (!eventRef) return null;
+    const eventRefs = normalizeEventRefs(partial.eventRefs);
+    if (!eventRefs.length) return null;
 
     return {
       header: partial.header?.trim() || DEFAULT_HEADER,
-      eventRef,
+      eventRefs,
     };
   };
 
   const applyConfig = (next: WidgetConfig) => {
-    config = next;
+    config = {header: next.header, eventRefs: [...next.eventRefs]};
     headerInput = next.header;
-    selectedEventRef = next.eventRef;
+    selectedEventRefs = [...next.eventRefs];
   };
+
+  const selectedEventCountText = $derived(
+    `${selectedEventRefs.length} event${selectedEventRefs.length === 1 ? '' : 's'} selected`
+  );
+
+  const isEventSelected = (event: NostrEvent) => selectedEventRefs.includes(getEventConfigRef(event));
+
+  function toggleSelectedEvent(event: NostrEvent) {
+    const ref = getEventConfigRef(event);
+    if (!ref) return;
+
+    selectedEventRefs = selectedEventRefs.includes(ref)
+      ? selectedEventRefs.filter((selectedRef) => selectedRef !== ref)
+      : [...selectedEventRefs, ref];
+  }
 
   const parseTimestamp = (value: string) => {
     if (!value) return undefined;
@@ -169,9 +198,6 @@
     return `${appOrigin}${path}`;
   };
 
-  const selectedEventPath = $derived(selectedEvent ? getEventPath(selectedEvent) : '');
-  const selectedEventHref = $derived(selectedEvent ? getEventHref(selectedEvent) : '');
-
   async function navigateToEvent(event: MouseEvent, path: string, href: string) {
     if (!bridge || !path) return;
 
@@ -209,6 +235,44 @@
     } else {
       document.documentElement.style.removeProperty('--host-background');
     }
+  };
+
+  const getContentHeight = () => {
+    const mainHeight = mainElement
+      ? Math.max(mainElement.scrollHeight, mainElement.getBoundingClientRect().height)
+      : 0;
+
+    return Math.ceil(
+      Math.max(
+        mainHeight,
+        document.body?.scrollHeight || 0,
+        document.documentElement?.scrollHeight || 0,
+        1
+      ) + 2
+    );
+  };
+
+  const requestHostResize = () => {
+    if (!bridge) return;
+
+    const height = getContentHeight();
+    if (!Number.isFinite(height) || height <= 0 || Math.abs(height - lastRequestedHeight) < 2) return;
+
+    lastRequestedHeight = height;
+    void bridge.request('ui:resize', {height}).catch(() => {
+      // Older hosts may ignore resize; the widget still works with iframe scrolling.
+    });
+  };
+
+  const scheduleHostResize = () => {
+    if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame);
+
+    resizeFrame = requestAnimationFrame(() => {
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = undefined;
+        requestHostResize();
+      });
+    });
   };
 
   async function startEditing() {
@@ -249,7 +313,7 @@
     const expectedContext = ctx;
     loadingConfig = true;
     error = '';
-    status = 'Loading featured event configuration...';
+    status = 'Loading featured events configuration...';
 
     try {
       const res = await bridge.request('community:querySharedConfig', {
@@ -263,7 +327,7 @@
 
       if ('error' in res) {
         error = res.error;
-        status = 'Unable to load featured event configuration.';
+        status = 'Unable to load featured events configuration.';
         return;
       }
 
@@ -272,18 +336,18 @@
       const sharedConfig = normalizeWidgetConfig(res.config);
       if (sharedConfig) {
         applyConfig(sharedConfig);
-        status = 'Featured event configuration loaded.';
+        status = 'Featured events configuration loaded.';
       } else if (hasUrlConfig) {
         applyConfig(initialUrlConfig);
-        status = 'Using featured event from widget URL.';
+        status = 'Using featured events from widget URL.';
       } else {
-        applyConfig({header: DEFAULT_HEADER, eventRef: ''});
-        status = 'No featured event configured yet.';
+        applyConfig({header: DEFAULT_HEADER, eventRefs: []});
+        status = 'No featured events configured yet.';
       }
     } catch (err) {
       if (!contextIsCurrent(expectedContext)) return;
       error = err instanceof Error ? err.message : String(err);
-      status = 'Unable to load featured event configuration.';
+      status = 'Unable to load featured events configuration.';
     } finally {
       if (contextIsCurrent(expectedContext)) loadingConfig = false;
     }
@@ -324,18 +388,18 @@
   }
 
   async function saveConfig() {
-    if (!communityContext || !selectedEventRef || !canConfigure) return;
+    if (!communityContext || !selectedEventRefs.length || !canConfigure) return;
 
     const expectedContext = communityContext;
 
     const next = {
       header: headerInput.trim() || DEFAULT_HEADER,
-      eventRef: selectedEventRef,
+      eventRefs: normalizeEventRefs(selectedEventRefs),
     };
 
     savingConfig = true;
     error = '';
-    status = 'Saving featured event for this community...';
+    status = 'Saving featured events for this community...';
     let saved = false;
 
     try {
@@ -349,8 +413,8 @@
       if (!contextIsCurrent(expectedContext)) return;
 
       if (!res || 'error' in res) {
-        error = res?.error || 'Unable to save featured event configuration.';
-        status = 'Unable to save featured event configuration.';
+        error = res?.error || 'Unable to save featured events configuration.';
+        status = 'Unable to save featured events configuration.';
         return;
       }
 
@@ -358,19 +422,19 @@
 
       applyConfig(next);
       editing = false;
-      status = 'Featured event saved for this community.';
+      status = 'Featured events saved for this community.';
       saved = true;
     } catch (err) {
       if (!contextIsCurrent(expectedContext)) return;
       error = err instanceof Error ? err.message : String(err);
-      status = 'Unable to save featured event configuration.';
+      status = 'Unable to save featured events configuration.';
     } finally {
       if (contextIsCurrent(expectedContext)) savingConfig = false;
     }
 
     if (saved) {
       try {
-        await bridge?.request('ui:toast', {message: 'Featured event saved', type: 'success'});
+        await bridge?.request('ui:toast', {message: 'Featured events saved', type: 'success'});
       } catch {
         // Toast is best-effort.
       }
@@ -388,17 +452,59 @@
     editing = false;
 
     const resetConfig = () => {
-      config = initialUrlConfig;
-      headerInput = initialUrlConfig.header;
-      selectedEventRef = initialUrlConfig.eventRef;
+      applyConfig(initialUrlConfig);
     };
 
     if (!communityContext || hasUrlConfig) {
       resetConfig();
     } else {
-      applyConfig({header: DEFAULT_HEADER, eventRef: ''});
+      applyConfig({header: DEFAULT_HEADER, eventRefs: []});
     }
   }
+
+  $effect(() => {
+    const element = mainElement;
+    if (!bridge || !element) return;
+
+    lastRequestedHeight = 0;
+    scheduleHostResize();
+
+    if (typeof ResizeObserver === 'undefined') return;
+
+    const observer = new ResizeObserver(scheduleHostResize);
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+      if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame);
+      resizeFrame = undefined;
+    };
+  });
+
+  $effect(() => {
+    let scrollHideTimer: ReturnType<typeof setTimeout> | undefined;
+    const markScrolling = () => {
+      document.documentElement.classList.add('is-scrolling');
+      if (scrollHideTimer) clearTimeout(scrollHideTimer);
+      scrollHideTimer = setTimeout(() => {
+        document.documentElement.classList.remove('is-scrolling');
+        scrollHideTimer = undefined;
+      }, 900);
+    };
+    const scrollOptions: AddEventListenerOptions = {capture: true, passive: true};
+
+    document.addEventListener('scroll', markScrolling, scrollOptions);
+    window.addEventListener('wheel', markScrolling, {passive: true});
+    window.addEventListener('touchmove', markScrolling, {passive: true});
+
+    return () => {
+      document.removeEventListener('scroll', markScrolling, scrollOptions);
+      window.removeEventListener('wheel', markScrolling);
+      window.removeEventListener('touchmove', markScrolling);
+      if (scrollHideTimer) clearTimeout(scrollHideTimer);
+      document.documentElement.classList.remove('is-scrolling');
+    };
+  });
 
   $effect(() => {
     const b = createWidgetBridge({
@@ -413,6 +519,7 @@
       initPayload = payload;
       applyTheme(payload.theme, payload.themeBackground);
       applyCommunityContext(payload.communityContext ?? null);
+      lastRequestedHeight = 0;
 
       status = communityContext
         ? `Connected to community context ${getCommunityContextKey(communityContext)}.`
@@ -420,10 +527,12 @@
       void refreshCalendarCapabilities(communityContext);
       void loadSharedConfig(communityContext);
       void loadCalendarEvents(communityContext);
+      scheduleHostResize();
     });
 
     const offCommunityChanged = b.onEvent('community:contextChanged', (payload) => {
       applyCommunityContext(payload.communityContext ?? null);
+      lastRequestedHeight = 0;
 
       status = communityContext
         ? `Community context updated to ${getCommunityContextKey(communityContext)}.`
@@ -431,6 +540,7 @@
       void refreshCalendarCapabilities(communityContext);
       void loadSharedConfig(communityContext);
       void loadCalendarEvents(communityContext);
+      scheduleHostResize();
     });
 
     const offThemeChanged = b.onEvent('widget:themeChanged', (payload) => {
@@ -449,48 +559,57 @@
   });
 </script>
 
-<main>
+<main bind:this={mainElement}>
   {#if !communityContext}
     <section class="panel muted">
       <strong>{DEFAULT_HEADER}</strong>
       <p>{status}</p>
     </section>
   {:else}
-    {#if selectedEvent}
-      <article class="event-card">
+    {#if selectedEvents.length}
+      <section class="featured-events" aria-labelledby="featured-events-heading">
         <div class="event-heading">
-          <p class="eyebrow">{config.header || DEFAULT_HEADER}</p>
+          <p id="featured-events-heading" class="eyebrow">{config.header || DEFAULT_HEADER}</p>
           {#if canConfigure}
             <button type="button" class="secondary small" onclick={startEditing}>Edit</button>
           {/if}
         </div>
-        <h1>
-          {#if selectedEventHref}
-            <a
-              class="event-title-link"
-              href={selectedEventHref}
-              target="_top"
-              onclick={(event) => navigateToEvent(event, selectedEventPath, selectedEventHref)}>
-              {getEventTitle(selectedEvent)}
-            </a>
-          {:else}
-            {getEventTitle(selectedEvent)}
-          {/if}
-        </h1>
-        <p class="date">{formatEventDate(selectedEvent)}</p>
-        {#if tagValue(selectedEvent, 'location')}
-          <p class="location">{tagValue(selectedEvent, 'location')}</p>
-        {/if}
-        {#if getEventSummary(selectedEvent)}
-          <p class="summary">{getVisibleEventSummary(selectedEvent)}</p>
-        {/if}
-      </article>
+
+        <div class="event-list">
+          {#each selectedEvents as featuredEvent (featuredEvent.id)}
+            {@const eventPath = getEventPath(featuredEvent)}
+            {@const eventHref = getEventHref(featuredEvent)}
+            <article class="event-card">
+              <h1>
+                {#if eventHref}
+                  <a
+                    class="event-title-link"
+                    href={eventHref}
+                    target="_top"
+                    onclick={(event) => navigateToEvent(event, eventPath, eventHref)}>
+                    {getEventTitle(featuredEvent)}
+                  </a>
+                {:else}
+                  {getEventTitle(featuredEvent)}
+                {/if}
+              </h1>
+              <p class="date">{formatEventDate(featuredEvent)}</p>
+              {#if tagValue(featuredEvent, 'location')}
+                <p class="location">{tagValue(featuredEvent, 'location')}</p>
+              {/if}
+              {#if getEventSummary(featuredEvent)}
+                <p class="summary">{getVisibleEventSummary(featuredEvent)}</p>
+              {/if}
+            </article>
+          {/each}
+        </div>
+      </section>
     {:else if loadingConfig || loadingEvents}
       <section class="panel muted">
         <strong>{config.header || DEFAULT_HEADER}</strong>
-        <p>{loadingConfig ? 'Loading featured event configuration...' : 'Loading calendar events...'}</p>
+        <p>{loadingConfig ? 'Loading featured events configuration...' : 'Loading calendar events...'}</p>
       </section>
-    {:else if config.eventRef}
+    {:else if config.eventRefs.length}
       <section class="panel warning">
         <div class="event-heading">
           <strong>{config.header || DEFAULT_HEADER}</strong>
@@ -498,7 +617,7 @@
             <button type="button" class="secondary small" onclick={startEditing}>Edit</button>
           {/if}
         </div>
-        <p>The configured event could not be found in this community.</p>
+        <p>The configured events could not be found in this community.</p>
       </section>
     {:else}
       <section class="panel muted">
@@ -516,7 +635,7 @@
       <section class="config-panel" bind:this={configPanelElement}>
         <div class="config-heading">
           <div>
-            <h2>Configure featured event</h2>
+            <h2>Configure featured events</h2>
           </div>
           <button type="button" onclick={() => loadCalendarEvents()} disabled={loadingEvents}>
             {loadingEvents ? 'Loading...' : 'Refresh'}
@@ -528,20 +647,34 @@
           <input bind:value={headerInput} placeholder={DEFAULT_HEADER} />
         </label>
 
-        <label>
-          <span>Calendar event</span>
-          <select bind:value={selectedEventRef}>
-            <option value="">Select an event</option>
-            {#each sortedEvents as event (event.id)}
-              <option value={calendarEventAddress(event) || event.id}>
-                {getEventTitle(event)} — {formatEventDate(event)}
-              </option>
-            {/each}
-          </select>
-        </label>
+        <div class="event-picker" role="group" aria-labelledby="event-picker-heading">
+          <div class="picker-heading">
+            <span id="event-picker-heading">Calendar events</span>
+            <span class="selected-count">{selectedEventCountText}</span>
+          </div>
+
+          {#if sortedEvents.length}
+            <div class="event-options">
+              {#each sortedEvents as event (event.id)}
+                <label class="event-option">
+                  <input
+                    type="checkbox"
+                    checked={isEventSelected(event)}
+                    onchange={() => toggleSelectedEvent(event)} />
+                  <span>
+                    <strong>{getEventTitle(event)}</strong>
+                    <span>{formatEventDate(event)}</span>
+                  </span>
+                </label>
+              {/each}
+            </div>
+          {:else}
+            <p class="picker-empty">No calendar events found.</p>
+          {/if}
+        </div>
 
         <div class="button-row">
-          <button type="button" onclick={saveConfig} disabled={!selectedEventRef || savingConfig}>
+          <button type="button" onclick={saveConfig} disabled={!selectedEventRefs.length || savingConfig}>
             {savingConfig ? 'Saving...' : 'Save for community'}
           </button>
           <button type="button" class="secondary" onclick={() => (editing = false)} disabled={savingConfig}>
@@ -595,6 +728,63 @@
       radial-gradient(circle at top right, rgba(249, 115, 22, 0.18), transparent 40%);
   }
 
+  :global(html),
+  :global(body),
+  .event-options {
+    scrollbar-color: transparent transparent;
+    scrollbar-width: thin;
+  }
+
+  :global(html.is-scrolling),
+  :global(html.is-scrolling body),
+  :global(html:hover),
+  :global(html:hover body),
+  :global(body:hover),
+  .event-options:hover,
+  .event-options:focus-within {
+    scrollbar-color: color-mix(in srgb, var(--text-soft) 48%, transparent) transparent;
+  }
+
+  :global(html::-webkit-scrollbar),
+  :global(body::-webkit-scrollbar),
+  .event-options::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  :global(html::-webkit-scrollbar-track),
+  :global(body::-webkit-scrollbar-track),
+  .event-options::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  :global(html::-webkit-scrollbar-thumb),
+  :global(body::-webkit-scrollbar-thumb),
+  .event-options::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 999px;
+    background: transparent;
+    background-clip: content-box;
+  }
+
+  :global(html.is-scrolling::-webkit-scrollbar-thumb),
+  :global(html.is-scrolling body::-webkit-scrollbar-thumb),
+  :global(html:hover::-webkit-scrollbar-thumb),
+  :global(html:hover body::-webkit-scrollbar-thumb),
+  :global(body:hover::-webkit-scrollbar-thumb),
+  .event-options:hover::-webkit-scrollbar-thumb,
+  .event-options:focus-within::-webkit-scrollbar-thumb {
+    background-color: color-mix(in srgb, var(--text-soft) 48%, transparent);
+  }
+
+  :global(html::-webkit-scrollbar-button),
+  :global(body::-webkit-scrollbar-button),
+  .event-options::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+
   :global(body[data-theme='dark']) {
     --accent: #fb923c;
     --accent-strong: #fdba74;
@@ -633,11 +823,18 @@
     padding: 20px;
   }
 
+  .featured-events,
+  .event-list {
+    display: grid;
+    gap: 12px;
+  }
+
   .event-heading {
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
     gap: 12px;
+    flex-wrap: wrap;
   }
 
   .eyebrow {
@@ -736,7 +933,7 @@
     line-height: 1.35;
   }
 
-  label {
+  label:not(.event-option) {
     display: grid;
     gap: 6px;
     margin-top: 12px;
@@ -745,8 +942,7 @@
     font-weight: 700;
   }
 
-  input,
-  select {
+  input:not([type='checkbox']) {
     box-sizing: border-box;
     width: 100%;
     min-width: 0;
@@ -759,8 +955,7 @@
     padding: 10px 11px;
   }
 
-  input:focus,
-  select:focus {
+  input:not([type='checkbox']):focus {
     border-color: var(--accent);
     outline: none;
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
@@ -794,6 +989,89 @@
     font-size: 0.76rem;
   }
 
+  .event-picker {
+    display: grid;
+    gap: 8px;
+    margin-top: 12px;
+    color: var(--text-muted);
+    font-size: 0.84rem;
+    font-weight: 700;
+  }
+
+  .picker-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .selected-count {
+    color: var(--text-soft);
+    white-space: nowrap;
+  }
+
+  .event-options {
+    display: grid;
+    gap: 8px;
+    max-height: min(52vh, 360px);
+    overflow: auto;
+    overscroll-behavior: contain;
+    padding: 2px;
+  }
+
+  .event-option {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: flex-start;
+    gap: 10px;
+    box-sizing: border-box;
+    margin: 0;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: var(--panel-muted);
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.84rem;
+    font-weight: 500;
+    padding: 10px;
+  }
+
+  .event-option:has(input:checked) {
+    border-color: var(--accent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+
+  .event-option input {
+    width: 18px;
+    height: 18px;
+    margin: 2px 0 0;
+    accent-color: var(--accent);
+  }
+
+  .event-option > span {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .event-option strong {
+    color: var(--text-strong);
+    font-size: 0.9rem;
+    line-height: 1.25;
+  }
+
+  .event-option span span {
+    color: var(--accent-muted);
+    font-weight: 700;
+    line-height: 1.3;
+  }
+
+  .picker-empty {
+    margin: 0;
+    color: var(--text-muted);
+    font-weight: 500;
+  }
+
   .error {
     color: #b91c1c;
   }
@@ -803,9 +1081,35 @@
       padding: 16px;
     }
 
+    h1 {
+      font-size: clamp(1.18rem, 7vw, 1.5rem);
+    }
+
     .config-heading,
     .button-row {
       display: grid;
+    }
+
+    .config-heading button,
+    .button-row button {
+      width: 100%;
+    }
+
+    .picker-heading {
+      display: grid;
+      gap: 4px;
+    }
+
+    .selected-count {
+      white-space: normal;
+    }
+
+    .event-options {
+      max-height: 46vh;
+    }
+
+    .event-option {
+      padding: 11px;
     }
   }
 </style>

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Featured calendar events</title>
+  <desc id="desc">A calendar page with a highlighted event marker.</desc>
+  <defs>
+    <linearGradient id="bg" x1="128" x2="896" y1="120" y2="904" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fff7ed" />
+      <stop offset="1" stop-color="#fed7aa" />
+    </linearGradient>
+    <linearGradient id="accent" x1="224" x2="820" y1="176" y2="844" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fb923c" />
+      <stop offset="1" stop-color="#c2410c" />
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="232" fill="url(#bg)" />
+  <rect x="164" y="204" width="696" height="648" rx="96" fill="#fffaf5" />
+  <path fill="url(#accent)" d="M260 204h504c53 0 96 43 96 96v96H164v-96c0-53 43-96 96-96Z" />
+  <rect x="288" y="124" width="84" height="180" rx="42" fill="#9a3412" />
+  <rect x="652" y="124" width="84" height="180" rx="42" fill="#9a3412" />
+  <rect x="250" y="492" width="116" height="96" rx="28" fill="#fed7aa" />
+  <rect x="454" y="492" width="116" height="96" rx="28" fill="#fed7aa" />
+  <rect x="658" y="492" width="116" height="96" rx="28" fill="#fed7aa" />
+  <rect x="250" y="672" width="116" height="96" rx="28" fill="#fed7aa" />
+  <rect x="454" y="672" width="116" height="96" rx="28" fill="#fed7aa" />
+  <circle cx="716" cy="720" r="94" fill="url(#accent)" />
+  <path fill="#fff7ed" d="M692 758 646 712l31-31 15 15 61-61 31 31-92 92Z" />
+</svg>
