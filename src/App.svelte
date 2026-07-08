@@ -18,6 +18,8 @@
   const DEFAULT_HEADER = 'Featured events';
   const NO_CONFIG_TEXT = 'No featured events have been configured for this community yet.';
   const SUMMARY_MAX_LENGTH = 200;
+  const DATA_LOAD_STALE_MS = 60_000;
+  const LIFECYCLE_RETRY_DEBOUNCE_MS = 5_000;
 
   type WidgetTheme = 'light' | 'dark';
 
@@ -67,6 +69,14 @@
   let configPanelElement = $state<HTMLElement | null>(null);
   let resizeFrame: number | undefined;
   let lastRequestedHeight = 0;
+  let loadingCapabilities = false;
+  let capabilitiesLoadedAt = 0;
+  let capabilitiesLoadFailed = false;
+  let configLoadedAt = 0;
+  let configLoadFailed = false;
+  let eventsLoadedAt = 0;
+  let eventsLoadFailed = false;
+  let lastLifecycleRetryAt = 0;
 
   const canConfigure = $derived(calendarCapabilities.some((capability) => capability.canModerate));
 
@@ -223,6 +233,9 @@
   const contextIsCurrent = (expectedContext: CommunityWidgetContext) =>
     getCommunityContextKey(communityContext) === getCommunityContextKey(expectedContext);
 
+  const shouldRetryDataLoad = (loadedAt: number, failed: boolean, now = Date.now()) =>
+    failed || loadedAt === 0 || now - loadedAt > DATA_LOAD_STALE_MS;
+
   const normalizeTheme = (value: unknown): WidgetTheme => (value === 'dark' ? 'dark' : 'light');
 
   const applyTheme = (theme: unknown, themeBackground?: unknown) => {
@@ -282,9 +295,10 @@
   }
 
   async function refreshCalendarCapabilities(ctx = communityContext) {
-    if (!bridge || !ctx) return;
+    if (!bridge || !ctx || loadingCapabilities) return;
 
     const expectedContext = ctx;
+    loadingCapabilities = true;
     try {
       const res = await bridge.request('community:checkWriteCapabilities', {
         descriptors: CALENDAR_DESCRIPTORS,
@@ -293,22 +307,32 @@
       if (!contextIsCurrent(expectedContext)) return;
 
       if ('error' in res) {
+        capabilitiesLoadFailed = true;
         error = res.error;
         status = 'Unable to check calendar configuration access.';
         return;
       }
 
-      if (!responseMatchesContext(res, expectedContext)) return;
+      if (!responseMatchesContext(res, expectedContext)) {
+        capabilitiesLoadFailed = true;
+        return;
+      }
+
       calendarCapabilities = res.capabilities;
+      capabilitiesLoadedAt = Date.now();
+      capabilitiesLoadFailed = false;
     } catch (err) {
       if (!contextIsCurrent(expectedContext)) return;
+      capabilitiesLoadFailed = true;
       error = err instanceof Error ? err.message : String(err);
       status = 'Unable to check calendar configuration access.';
+    } finally {
+      if (contextIsCurrent(expectedContext)) loadingCapabilities = false;
     }
   }
 
   async function loadSharedConfig(ctx = communityContext) {
-    if (!bridge || !ctx) return;
+    if (!bridge || !ctx || loadingConfig) return;
 
     const expectedContext = ctx;
     loadingConfig = true;
@@ -326,12 +350,16 @@
       if (!contextIsCurrent(expectedContext)) return;
 
       if ('error' in res) {
+        configLoadFailed = true;
         error = res.error;
         status = 'Unable to load featured events configuration.';
         return;
       }
 
-      if (!responseMatchesContext(res, expectedContext)) return;
+      if (!responseMatchesContext(res, expectedContext)) {
+        configLoadFailed = true;
+        return;
+      }
 
       const sharedConfig = normalizeWidgetConfig(res.config);
       if (sharedConfig) {
@@ -344,8 +372,11 @@
         applyConfig({header: DEFAULT_HEADER, eventRefs: []});
         status = 'No featured events configured yet.';
       }
+      configLoadedAt = Date.now();
+      configLoadFailed = false;
     } catch (err) {
       if (!contextIsCurrent(expectedContext)) return;
+      configLoadFailed = true;
       error = err instanceof Error ? err.message : String(err);
       status = 'Unable to load featured events configuration.';
     } finally {
@@ -354,7 +385,7 @@
   }
 
   async function loadCalendarEvents(ctx = communityContext) {
-    if (!bridge || !ctx) return;
+    if (!bridge || !ctx || loadingEvents) return;
 
     const expectedContext = ctx;
     loadingEvents = true;
@@ -370,16 +401,24 @@
       if (!contextIsCurrent(expectedContext)) return;
 
       if ('error' in res) {
+        eventsLoadFailed = true;
         error = res.error;
         status = 'Unable to load calendar events.';
         return;
       }
 
-      if (!responseMatchesContext(res, expectedContext)) return;
+      if (!responseMatchesContext(res, expectedContext)) {
+        eventsLoadFailed = true;
+        return;
+      }
+
       events = res.events.filter((event) => event.kind === EVENT_TIME || event.kind === EVENT_DATE);
+      eventsLoadedAt = Date.now();
+      eventsLoadFailed = false;
       status = events.length ? '' : 'No events found.';
     } catch (err) {
       if (!contextIsCurrent(expectedContext)) return;
+      eventsLoadFailed = true;
       error = err instanceof Error ? err.message : String(err);
       status = 'Unable to load calendar events.';
     } finally {
@@ -446,10 +485,18 @@
     calendarCapabilities = [];
     events = [];
     error = '';
+    loadingCapabilities = false;
     loadingConfig = false;
     loadingEvents = false;
     savingConfig = false;
     editing = false;
+    capabilitiesLoadedAt = 0;
+    capabilitiesLoadFailed = false;
+    configLoadedAt = 0;
+    configLoadFailed = false;
+    eventsLoadedAt = 0;
+    eventsLoadFailed = false;
+    lastLifecycleRetryAt = 0;
 
     const resetConfig = () => {
       applyConfig(initialUrlConfig);
@@ -460,6 +507,37 @@
     } else {
       applyConfig({header: DEFAULT_HEADER, eventRefs: []});
     }
+  }
+
+  function retryStaleCommunityLoads() {
+    if (!bridge || !communityContext) return;
+
+    const now = Date.now();
+    if (now - lastLifecycleRetryAt < LIFECYCLE_RETRY_DEBOUNCE_MS) return;
+
+    const expectedContext = communityContext;
+    let retried = false;
+
+    if (!loadingCapabilities && shouldRetryDataLoad(capabilitiesLoadedAt, capabilitiesLoadFailed, now)) {
+      retried = true;
+      void refreshCalendarCapabilities(expectedContext);
+    }
+
+    if (!loadingConfig && shouldRetryDataLoad(configLoadedAt, configLoadFailed, now)) {
+      retried = true;
+      void loadSharedConfig(expectedContext);
+    }
+
+    if (!loadingEvents && shouldRetryDataLoad(eventsLoadedAt, eventsLoadFailed, now)) {
+      retried = true;
+      void loadCalendarEvents(expectedContext);
+    }
+
+    if (retried) lastLifecycleRetryAt = now;
+  }
+
+  function retryVisibleCommunityLoads() {
+    if (document.visibilityState === 'visible') retryStaleCommunityLoads();
   }
 
   $effect(() => {
@@ -503,6 +581,20 @@
       window.removeEventListener('touchmove', markScrolling);
       if (scrollHideTimer) clearTimeout(scrollHideTimer);
       document.documentElement.classList.remove('is-scrolling');
+    };
+  });
+
+  $effect(() => {
+    window.addEventListener('pageshow', retryStaleCommunityLoads);
+    window.addEventListener('focus', retryStaleCommunityLoads);
+    window.addEventListener('online', retryStaleCommunityLoads);
+    document.addEventListener('visibilitychange', retryVisibleCommunityLoads);
+
+    return () => {
+      window.removeEventListener('pageshow', retryStaleCommunityLoads);
+      window.removeEventListener('focus', retryStaleCommunityLoads);
+      window.removeEventListener('online', retryStaleCommunityLoads);
+      document.removeEventListener('visibilitychange', retryVisibleCommunityLoads);
     };
   });
 
