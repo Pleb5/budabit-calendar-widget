@@ -20,12 +20,17 @@
   const SUMMARY_MAX_LENGTH = 200;
   const DATA_LOAD_STALE_MS = 60_000;
   const LIFECYCLE_RETRY_DEBOUNCE_MS = 5_000;
+  const COMMUNITY_CONTEXT_NOT_READY_CODE = 'COMMUNITY_CONTEXT_NOT_READY';
 
   type WidgetTheme = 'light' | 'dark';
 
   type WidgetConfig = {
     header: string;
     eventRefs: string[];
+  };
+
+  type LoadCalendarEventsOptions = {
+    refs?: string[];
   };
 
   const tagValue = (event: Pick<NostrEvent, 'tags'>, name: string) =>
@@ -61,6 +66,8 @@
   let error = $state('');
   let loadingConfig = $state(false);
   let loadingEvents = $state(false);
+  let configLoaded = $state(hasUrlConfig);
+  let eventsLoaded = $state(false);
   let savingConfig = $state(false);
   let editing = $state(false);
   let calendarCapabilities = $state<CommunityWriteCapability[]>([]);
@@ -125,15 +132,27 @@
     `${selectedEventRefs.length} event${selectedEventRefs.length === 1 ? '' : 's'} selected`
   );
 
-  const isEventSelected = (event: NostrEvent) => selectedEventRefs.includes(getEventConfigRef(event));
+  const unresolvedSelectedEventRefs = $derived.by(() =>
+    selectedEventRefs.filter((ref) => !sortedEvents.some((event) => matchesEventRef(event, ref)))
+  );
+
+  const isEventSelected = (event: NostrEvent) =>
+    selectedEventRefs.some((ref) => matchesEventRef(event, ref));
 
   function toggleSelectedEvent(event: NostrEvent) {
     const ref = getEventConfigRef(event);
     if (!ref) return;
 
-    selectedEventRefs = selectedEventRefs.includes(ref)
-      ? selectedEventRefs.filter((selectedRef) => selectedRef !== ref)
+    const eventRefs = getEventRefs(event);
+    const selected = selectedEventRefs.some((selectedRef) => eventRefs.includes(selectedRef));
+
+    selectedEventRefs = selected
+      ? selectedEventRefs.filter((selectedRef) => !eventRefs.includes(selectedRef))
       : [...selectedEventRefs, ref];
+  }
+
+  function removeSelectedEventRef(ref: string) {
+    selectedEventRefs = selectedEventRefs.filter((selectedRef) => selectedRef !== ref);
   }
 
   const parseTimestamp = (value: string) => {
@@ -236,6 +255,14 @@
   const shouldRetryDataLoad = (loadedAt: number, failed: boolean, now = Date.now()) =>
     failed || loadedAt === 0 || now - loadedAt > DATA_LOAD_STALE_MS;
 
+  const isContextNotReadyResponse = (value: unknown) =>
+    Boolean(
+      value &&
+        typeof value === 'object' &&
+        'error' in value &&
+        (value as {code?: string}).code === COMMUNITY_CONTEXT_NOT_READY_CODE
+    );
+
   const normalizeTheme = (value: unknown): WidgetTheme => (value === 'dark' ? 'dark' : 'light');
 
   const applyTheme = (theme: unknown, themeBackground?: unknown) => {
@@ -290,6 +317,7 @@
 
   async function startEditing() {
     editing = true;
+    void loadCalendarEvents(communityContext, {refs: []});
     await tick();
     configPanelElement?.scrollIntoView({behavior: 'smooth', block: 'start'});
   }
@@ -308,6 +336,11 @@
 
       if ('error' in res) {
         capabilitiesLoadFailed = true;
+        if (isContextNotReadyResponse(res)) {
+          error = '';
+          status = 'Waiting for community permissions...';
+          return;
+        }
         error = res.error;
         status = 'Unable to check calendar configuration access.';
         return;
@@ -351,6 +384,11 @@
 
       if ('error' in res) {
         configLoadFailed = true;
+        if (isContextNotReadyResponse(res)) {
+          error = '';
+          status = 'Waiting for featured events configuration...';
+          return;
+        }
         error = res.error;
         status = 'Unable to load featured events configuration.';
         return;
@@ -372,8 +410,10 @@
         applyConfig({header: DEFAULT_HEADER, eventRefs: []});
         status = 'No featured events configured yet.';
       }
+      configLoaded = true;
       configLoadedAt = Date.now();
       configLoadFailed = false;
+      void loadCalendarEvents(expectedContext);
     } catch (err) {
       if (!contextIsCurrent(expectedContext)) return;
       configLoadFailed = true;
@@ -384,10 +424,14 @@
     }
   }
 
-  async function loadCalendarEvents(ctx = communityContext) {
+  async function loadCalendarEvents(
+    ctx = communityContext,
+    options: LoadCalendarEventsOptions = {}
+  ) {
     if (!bridge || !ctx || loadingEvents) return;
 
     const expectedContext = ctx;
+    const refs = options.refs ?? config.eventRefs;
     loadingEvents = true;
     error = '';
     status = 'Loading community calendar events...';
@@ -396,12 +440,18 @@
       const res = await bridge.request('community:queryEvents', {
         descriptors: CALENDAR_DESCRIPTORS,
         limit: 500,
+        ...(refs.length ? {refs} : {}),
       });
 
       if (!contextIsCurrent(expectedContext)) return;
 
       if ('error' in res) {
         eventsLoadFailed = true;
+        if (isContextNotReadyResponse(res)) {
+          error = '';
+          status = 'Waiting for community calendar events...';
+          return;
+        }
         error = res.error;
         status = 'Unable to load calendar events.';
         return;
@@ -413,6 +463,7 @@
       }
 
       events = res.events.filter((event) => event.kind === EVENT_TIME || event.kind === EVENT_DATE);
+      eventsLoaded = true;
       eventsLoadedAt = Date.now();
       eventsLoadFailed = false;
       status = events.length ? '' : 'No events found.';
@@ -427,7 +478,7 @@
   }
 
   async function saveConfig() {
-    if (!communityContext || !selectedEventRefs.length || !canConfigure) return;
+    if (!communityContext || !canConfigure) return;
 
     const expectedContext = communityContext;
 
@@ -488,6 +539,8 @@
     loadingCapabilities = false;
     loadingConfig = false;
     loadingEvents = false;
+    configLoaded = hasUrlConfig;
+    eventsLoaded = false;
     savingConfig = false;
     editing = false;
     capabilitiesLoadedAt = 0;
@@ -618,7 +671,6 @@
         : 'Waiting for BudaBit community context...';
       void refreshCalendarCapabilities(communityContext);
       void loadSharedConfig(communityContext);
-      void loadCalendarEvents(communityContext);
       scheduleHostResize();
     });
 
@@ -631,7 +683,6 @@
         : 'Waiting for BudaBit community context...';
       void refreshCalendarCapabilities(communityContext);
       void loadSharedConfig(communityContext);
-      void loadCalendarEvents(communityContext);
       scheduleHostResize();
     });
 
@@ -696,10 +747,10 @@
           {/each}
         </div>
       </section>
-    {:else if loadingConfig || loadingEvents}
+    {:else if loadingConfig || loadingEvents || !configLoaded || (config.eventRefs.length > 0 && !eventsLoaded)}
       <section class="panel muted">
         <strong>{config.header || DEFAULT_HEADER}</strong>
-        <p>{loadingConfig ? 'Loading featured events configuration...' : 'Loading calendar events...'}</p>
+        <p>{loadingConfig || !configLoaded ? 'Loading featured events configuration...' : 'Loading calendar events...'}</p>
       </section>
     {:else if config.eventRefs.length}
       <section class="panel warning">
@@ -729,7 +780,7 @@
           <div>
             <h2>Configure featured events</h2>
           </div>
-          <button type="button" onclick={() => loadCalendarEvents()} disabled={loadingEvents}>
+          <button type="button" onclick={() => loadCalendarEvents(communityContext, {refs: []})} disabled={loadingEvents}>
             {loadingEvents ? 'Loading...' : 'Refresh'}
           </button>
         </div>
@@ -738,6 +789,22 @@
           <span>Header</span>
           <input bind:value={headerInput} placeholder={DEFAULT_HEADER} />
         </label>
+
+        {#if unresolvedSelectedEventRefs.length}
+          <div class="unresolved-events">
+            <p>These configured event refs were not found. Remove them or choose another event below.</p>
+            <div class="missing-ref-list">
+              {#each unresolvedSelectedEventRefs as ref (ref)}
+                <div class="missing-ref">
+                  <code>{ref}</code>
+                  <button type="button" class="secondary small" onclick={() => removeSelectedEventRef(ref)}>
+                    Remove
+                  </button>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
 
         <div class="event-picker" role="group" aria-labelledby="event-picker-heading">
           <div class="picker-heading">
@@ -766,7 +833,7 @@
         </div>
 
         <div class="button-row">
-          <button type="button" onclick={saveConfig} disabled={!selectedEventRefs.length || savingConfig}>
+          <button type="button" onclick={saveConfig} disabled={savingConfig}>
             {savingConfig ? 'Saving...' : 'Save for community'}
           </button>
           <button type="button" class="secondary" onclick={() => (editing = false)} disabled={savingConfig}>
@@ -1051,6 +1118,44 @@
     border-color: var(--accent);
     outline: none;
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
+  }
+
+  .unresolved-events {
+    display: grid;
+    gap: 8px;
+    margin-top: 12px;
+    border: 1px solid rgba(202, 138, 4, 0.34);
+    border-radius: 12px;
+    background: color-mix(in srgb, #fef3c7 36%, var(--panel-muted));
+    color: var(--text-muted);
+    font-size: 0.84rem;
+    padding: 10px;
+  }
+
+  .unresolved-events p {
+    margin: 0;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+
+  .missing-ref-list {
+    display: grid;
+    gap: 6px;
+  }
+
+  .missing-ref {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .missing-ref code {
+    color: var(--text-strong);
+    font-size: 0.78rem;
+    font-weight: 700;
+    overflow-wrap: anywhere;
   }
 
   button {
