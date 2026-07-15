@@ -15,6 +15,7 @@
   const CALENDAR_DESCRIPTORS: CommunityEventDescriptor[] = [{kind: EVENT_TIME}, {kind: EVENT_DATE}];
   const CONFIG_NAMESPACE = 'budabit-calendar-widget';
   const CONFIG_KEY = 'featured-calendar-event';
+  const LEGACY_STORAGE_PREFIX = 'bubdabit-calendar-widget:config:';
   const DEFAULT_HEADER = 'Featured events';
   const NO_CONFIG_TEXT = 'No featured events have been configured for this community yet.';
   const SUMMARY_MAX_LENGTH = 200;
@@ -24,6 +25,10 @@
   type WidgetConfig = {
     header: string;
     eventRefs: string[];
+  };
+
+  type LoadCalendarEventsOptions = {
+    refs?: string[];
   };
 
   const tagValue = (event: Pick<NostrEvent, 'tags'>, name: string) =>
@@ -59,6 +64,8 @@
   let error = $state('');
   let loadingConfig = $state(false);
   let loadingEvents = $state(false);
+  let configResolved = $state(false);
+  let eventsResolved = $state(false);
   let savingConfig = $state(false);
   let editing = $state(false);
   let calendarCapabilities = $state<CommunityWriteCapability[]>([]);
@@ -67,6 +74,39 @@
   let configPanelElement = $state<HTMLElement | null>(null);
   let resizeFrame: number | undefined;
   let lastRequestedHeight = 0;
+  let configRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  let eventsRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  let configRetryCount = 0;
+  let eventsRetryCount = 0;
+  const MAX_LOAD_RETRIES = 3;
+
+  const isTransientCommunityError = (response: {code?: string}) =>
+    response.code === 'COMMUNITY_CONTEXT_NOT_READY' || response.code === 'COMMUNITY_QUERY_TIMEOUT';
+
+  const clearLoadRetries = () => {
+    if (configRetryTimer) clearTimeout(configRetryTimer);
+    if (eventsRetryTimer) clearTimeout(eventsRetryTimer);
+    configRetryTimer = undefined;
+    eventsRetryTimer = undefined;
+  };
+
+  const retryConfig = (ctx: CommunityWidgetContext) => {
+    if (configRetryCount >= MAX_LOAD_RETRIES || configRetryTimer) return;
+    configRetryCount += 1;
+    configRetryTimer = setTimeout(() => {
+      configRetryTimer = undefined;
+      void loadSharedConfig(ctx);
+    }, configRetryCount * 1000);
+  };
+
+  const retryEvents = (ctx: CommunityWidgetContext, refs: string[]) => {
+    if (eventsRetryCount >= MAX_LOAD_RETRIES || eventsRetryTimer) return;
+    eventsRetryCount += 1;
+    eventsRetryTimer = setTimeout(() => {
+      eventsRetryTimer = undefined;
+      void loadCalendarEvents(ctx, {refs});
+    }, eventsRetryCount * 1000);
+  };
 
   const canConfigure = $derived(calendarCapabilities.some((capability) => capability.canModerate));
 
@@ -95,14 +135,25 @@
   const normalizeWidgetConfig = (value: unknown): WidgetConfig | null => {
     if (!value || typeof value !== 'object') return null;
 
-    const partial = value as Partial<WidgetConfig>;
-    const eventRefs = normalizeEventRefs(partial.eventRefs);
+    const partial = value as Partial<WidgetConfig> & {eventRef?: unknown};
+    const eventRefs = normalizeEventRefs(
+      partial.eventRefs?.length ? partial.eventRefs : [partial.eventRef]
+    );
     if (!eventRefs.length) return null;
 
     return {
       header: partial.header?.trim() || DEFAULT_HEADER,
       eventRefs,
     };
+  };
+
+  const readLegacyLocalConfig = (ctx: CommunityWidgetContext): WidgetConfig | null => {
+    try {
+      const raw = localStorage.getItem(`${LEGACY_STORAGE_PREFIX}${ctx.pubkey}`);
+      return raw ? normalizeWidgetConfig(JSON.parse(raw)) : null;
+    } catch {
+      return null;
+    }
   };
 
   const applyConfig = (next: WidgetConfig) => {
@@ -289,6 +340,7 @@
 
   async function startEditing() {
     editing = true;
+    void loadCalendarEvents(communityContext, {refs: []});
     await tick();
     configPanelElement?.scrollIntoView({behavior: 'smooth', block: 'start'});
   }
@@ -321,7 +373,7 @@
   }
 
   async function loadSharedConfig(ctx = communityContext) {
-    if (!bridge || !ctx) return;
+    if (!bridge || !ctx || loadingConfig) return;
 
     const expectedContext = ctx;
     loadingConfig = true;
@@ -340,36 +392,53 @@
 
       if ('error' in res) {
         error = res.error;
-        status = 'Unable to load featured events configuration.';
+        status = isTransientCommunityError(res)
+          ? 'Loading community permissions and featured events configuration...'
+          : 'Unable to load featured events configuration.';
+        if (isTransientCommunityError(res)) retryConfig(expectedContext);
         return;
       }
 
       if (!responseMatchesContext(res, expectedContext)) return;
 
       const sharedConfig = normalizeWidgetConfig(res.config);
+      const legacyConfig = readLegacyLocalConfig(expectedContext);
+      let nextConfig: WidgetConfig;
       if (sharedConfig) {
-        applyConfig(sharedConfig);
+        nextConfig = sharedConfig;
         status = 'Featured events configuration loaded.';
       } else if (hasUrlConfig) {
-        applyConfig(initialUrlConfig);
+        nextConfig = initialUrlConfig;
         status = 'Using featured events from widget URL.';
+      } else if (legacyConfig) {
+        nextConfig = legacyConfig;
+        status = 'Using migrated featured event configuration.';
       } else {
-        applyConfig({header: DEFAULT_HEADER, eventRefs: []});
+        nextConfig = {header: DEFAULT_HEADER, eventRefs: []};
         status = 'No featured events configured yet.';
       }
+      configResolved = true;
+      configRetryCount = 0;
+      applyConfig(nextConfig);
+      void loadCalendarEvents(expectedContext, {refs: nextConfig.eventRefs});
     } catch (err) {
       if (!contextIsCurrent(expectedContext)) return;
       error = err instanceof Error ? err.message : String(err);
       status = 'Unable to load featured events configuration.';
+      retryConfig(expectedContext);
     } finally {
       if (contextIsCurrent(expectedContext)) loadingConfig = false;
     }
   }
 
-  async function loadCalendarEvents(ctx = communityContext) {
-    if (!bridge || !ctx) return;
+  async function loadCalendarEvents(
+    ctx = communityContext,
+    options: LoadCalendarEventsOptions = {}
+  ) {
+    if (!bridge || !ctx || loadingEvents) return;
 
     const expectedContext = ctx;
+    const refs = options.refs ?? config.eventRefs;
     loadingEvents = true;
     error = '';
     status = 'Loading community calendar events...';
@@ -378,24 +447,31 @@
       const res = await bridge.request('community:queryEvents', {
         descriptors: CALENDAR_DESCRIPTORS,
         limit: 500,
+        ...(refs.length ? {refs} : {}),
       });
 
       if (!contextIsCurrent(expectedContext)) return;
 
       if ('error' in res) {
         error = res.error;
-        status = 'Unable to load calendar events.';
+        status = isTransientCommunityError(res)
+          ? 'Loading community calendar events...'
+          : 'Unable to load calendar events.';
+        if (isTransientCommunityError(res)) retryEvents(expectedContext, refs);
         return;
       }
 
       if (!responseMatchesContext(res, expectedContext)) return;
 
       events = res.events.filter((event) => event.kind === EVENT_TIME || event.kind === EVENT_DATE);
+      eventsResolved = true;
+      eventsRetryCount = 0;
       status = events.length ? '' : 'No events found.';
     } catch (err) {
       if (!contextIsCurrent(expectedContext)) return;
       error = err instanceof Error ? err.message : String(err);
       status = 'Unable to load calendar events.';
+      retryEvents(expectedContext, refs);
     } finally {
       if (contextIsCurrent(expectedContext)) loadingEvents = false;
     }
@@ -462,6 +538,11 @@
     error = '';
     loadingConfig = false;
     loadingEvents = false;
+    configResolved = false;
+    eventsResolved = false;
+    configRetryCount = 0;
+    eventsRetryCount = 0;
+    clearLoadRetries();
     savingConfig = false;
     editing = false;
 
@@ -540,7 +621,6 @@
         : 'Waiting for BudaBit community context...';
       void refreshCalendarCapabilities(communityContext);
       void loadSharedConfig(communityContext);
-      void loadCalendarEvents(communityContext);
       scheduleHostResize();
     });
 
@@ -553,7 +633,6 @@
         : 'Waiting for BudaBit community context...';
       void refreshCalendarCapabilities(communityContext);
       void loadSharedConfig(communityContext);
-      void loadCalendarEvents(communityContext);
       scheduleHostResize();
     });
 
@@ -568,6 +647,7 @@
       offCommunityChanged();
       offThemeChanged();
       b.destroy();
+      clearLoadRetries();
       bridge = null;
     };
   });
@@ -618,10 +698,14 @@
           {/each}
         </div>
       </section>
-    {:else if loadingConfig || loadingEvents}
+    {:else if
+      loadingConfig ||
+      loadingEvents ||
+      !configResolved ||
+      (config.eventRefs.length > 0 && !eventsResolved)}
       <section class="panel muted">
         <strong>{config.header || DEFAULT_HEADER}</strong>
-        <p>{loadingConfig ? 'Loading featured events configuration...' : 'Loading calendar events...'}</p>
+        <p>{status}</p>
       </section>
     {:else if config.eventRefs.length}
       <section class="panel warning">
@@ -651,7 +735,10 @@
           <div>
             <h2>Configure featured events</h2>
           </div>
-          <button type="button" onclick={() => loadCalendarEvents()} disabled={loadingEvents}>
+          <button
+            type="button"
+            onclick={() => loadCalendarEvents(communityContext, {refs: []})}
+            disabled={loadingEvents}>
             {loadingEvents ? 'Loading...' : 'Refresh'}
           </button>
         </div>
