@@ -9,44 +9,78 @@
     type WidgetBridge,
     type WidgetInitPayload,
   } from 'budabit-sdk';
+  import {
+    DEFAULT_HEADER,
+    EVENT_DATE,
+    EVENT_TIME,
+    advanceRequestEpoch,
+    beginRequest,
+    canonicalizeEventRefs,
+    collapseCalendarEventReplacements,
+    completeRequest,
+    createRequestState,
+    eventTagValue,
+    failRequest,
+    getEventConfigRef,
+    getHostCapabilityCatalog,
+    getHostCapabilityPolicy,
+    hostCanAttempt,
+    isBlockingRequestError,
+    isUnsupportedCapabilityError,
+    matchesEventRef,
+    mergeCalendarEventsForRefs,
+    normalizeEventRefs,
+    normalizeWidgetConfig,
+    planEventQueries,
+    requestEpochIsCurrent,
+    resolveSharedWidgetConfig,
+    retainRequestValue,
+    unavailableRequest,
+    type HostCapabilityAction,
+    type RequestState,
+    type WidgetConfig,
+  } from './lib/compatibility';
+  import {createBoundedPoll} from './lib/boundedPoll';
 
-  const EVENT_DATE = 31922;
-  const EVENT_TIME = 31923;
   const CALENDAR_DESCRIPTORS: CommunityEventDescriptor[] = [{kind: EVENT_TIME}, {kind: EVENT_DATE}];
   const CONFIG_NAMESPACE = 'budabit-calendar-widget';
   const CONFIG_KEY = 'featured-calendar-event';
-  const LEGACY_STORAGE_PREFIX = 'bubdabit-calendar-widget:config:';
-  const DEFAULT_HEADER = 'Featured events';
+  const LEGACY_STORAGE_PREFIXES = [
+    'budabit-calendar-widget:config:',
+    'bubdabit-calendar-widget:config:',
+  ];
   const NO_CONFIG_TEXT = 'No featured events have been configured for this community yet.';
   const SUMMARY_MAX_LENGTH = 200;
+  const POST_INIT_REFRESH_DELAYS_MS = [1500, 3000, 5000, 8000, 12000] as const;
+  const RESUME_REFRESH_DEBOUNCE_MS = 300;
+  const BRIDGE_TIMEOUT_MS = 60_000;
 
   type WidgetTheme = 'light' | 'dark';
 
-  type WidgetConfig = {
-    header: string;
-    eventRefs: string[];
-  };
-
   type LoadCalendarEventsOptions = {
     refs?: string[];
+    broad?: boolean;
+    attempt?: number;
+    runId?: number;
+    background?: boolean;
   };
 
-  const tagValue = (event: Pick<NostrEvent, 'tags'>, name: string) =>
-    event.tags.find((tag) => tag[0] === name)?.[1] || '';
+  type LoadRequestOptions = {
+    attempt?: number;
+    runId?: number;
+    background?: boolean;
+  };
 
-  const normalizeEventRefs = (refs: unknown) =>
-    Array.isArray(refs)
-      ? Array.from(
-          new Set(refs.map((ref) => (typeof ref === 'string' ? ref.trim() : '')).filter(Boolean))
-        )
-      : [];
+  type PendingEventsLoad = Pick<LoadCalendarEventsOptions, 'refs' | 'broad' | 'background'>;
+
+  const tagValue = eventTagValue;
 
   const readUrlConfig = (): WidgetConfig => {
     const params = new URLSearchParams(window.location.search);
 
     return {
       header: params.get('header')?.trim() || DEFAULT_HEADER,
-      eventRefs: normalizeEventRefs(params.getAll('event')),
+      eventRefs: normalizeEventRefs([...params.getAll('event'), ...params.getAll('eventRef')]),
     };
   };
 
@@ -62,67 +96,117 @@
   let selectedEventRefs = $state<string[]>(initialUrlConfig.eventRefs);
   let status = $state('Waiting for BudaBit community context...');
   let error = $state('');
-  let loadingConfig = $state(false);
-  let loadingEvents = $state(false);
-  let configResolved = $state(false);
-  let eventsResolved = $state(false);
+  let configRequest = $state<RequestState>(createRequestState());
+  let eventsRequest = $state<RequestState>(createRequestState());
+  let capabilitiesRequest = $state<RequestState>(createRequestState());
   let savingConfig = $state(false);
   let editing = $state(false);
   let calendarCapabilities = $state<CommunityWriteCapability[]>([]);
+  let hostCapabilityCatalog = $state<string[] | null>(null);
+  let runtimeUnsupportedActions = $state<HostCapabilityAction[]>([]);
   let widgetTheme = $state<WidgetTheme>('light');
   let mainElement = $state<HTMLElement | null>(null);
   let configPanelElement = $state<HTMLElement | null>(null);
   let resizeFrame: number | undefined;
   let lastRequestedHeight = 0;
+  let contextGeneration = 0;
+  let configRunId = 0;
+  let eventsRunId = 0;
+  let capabilitiesRunId = 0;
   let configRetryTimer: ReturnType<typeof setTimeout> | undefined;
   let eventsRetryTimer: ReturnType<typeof setTimeout> | undefined;
-  let configRetryCount = 0;
-  let eventsRetryCount = 0;
-  const MAX_LOAD_RETRIES = 3;
+  let capabilitiesRetryTimer: ReturnType<typeof setTimeout> | undefined;
+  let resumeRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+  let pendingConfigRefresh = false;
+  let pendingCapabilitiesRefresh = false;
+  let pendingEventsLoad: PendingEventsLoad | null = null;
+  let currentEventsLoadKey = '';
+  const postInitRefreshPoll = createBoundedPoll(POST_INIT_REFRESH_DELAYS_MS);
 
-  const isTransientCommunityError = (response: {code?: string}) =>
-    response.code === 'COMMUNITY_CONTEXT_NOT_READY' || response.code === 'COMMUNITY_QUERY_TIMEOUT';
+  const hostCapabilityPolicy = $derived(
+    getHostCapabilityPolicy(hostCapabilityCatalog, runtimeUnsupportedActions)
+  );
+  const queryEventsSupported = $derived(
+    hostCanAttempt(hostCapabilityPolicy['community:queryEvents'])
+  );
+  const querySharedConfigSupported = $derived(
+    hostCanAttempt(hostCapabilityPolicy['community:querySharedConfig'])
+  );
+  const publishSharedConfigSupported = $derived(
+    hostCanAttempt(hostCapabilityPolicy['community:publishSharedConfig'])
+  );
+  const checkCapabilitiesSupported = $derived(
+    hostCanAttempt(hostCapabilityPolicy['community:checkWriteCapabilities'])
+  );
+  const loadingEvents = $derived(
+    eventsRequest.phase === 'loading' || eventsRequest.phase === 'retrying'
+  );
 
   const clearLoadRetries = () => {
     if (configRetryTimer) clearTimeout(configRetryTimer);
     if (eventsRetryTimer) clearTimeout(eventsRetryTimer);
+    if (capabilitiesRetryTimer) clearTimeout(capabilitiesRetryTimer);
     configRetryTimer = undefined;
     eventsRetryTimer = undefined;
+    capabilitiesRetryTimer = undefined;
   };
 
-  const retryConfig = (ctx: CommunityWidgetContext) => {
-    if (configRetryCount >= MAX_LOAD_RETRIES || configRetryTimer) return;
-    configRetryCount += 1;
-    configRetryTimer = setTimeout(() => {
-      configRetryTimer = undefined;
-      void loadSharedConfig(ctx);
-    }, configRetryCount * 1000);
+  const clearRefreshTimers = () => {
+    postInitRefreshPoll.stop();
+    if (resumeRefreshTimer) clearTimeout(resumeRefreshTimer);
+    resumeRefreshTimer = undefined;
   };
 
-  const retryEvents = (ctx: CommunityWidgetContext, refs: string[]) => {
-    if (eventsRetryCount >= MAX_LOAD_RETRIES || eventsRetryTimer) return;
-    eventsRetryCount += 1;
-    eventsRetryTimer = setTimeout(() => {
-      eventsRetryTimer = undefined;
-      void loadCalendarEvents(ctx, {refs});
-    }, eventsRetryCount * 1000);
-  };
+  const canConfigure = $derived(
+    queryEventsSupported &&
+      querySharedConfigSupported &&
+      publishSharedConfigSupported &&
+      checkCapabilitiesSupported &&
+      calendarCapabilities.some((capability) => capability.canModerate)
+  );
 
-  const canConfigure = $derived(calendarCapabilities.some((capability) => capability.canModerate));
+  const compatibilityMessage = $derived.by(() => {
+    if (!queryEventsSupported) {
+      return 'This BudaBit host does not support the community event query required by this widget.';
+    }
+    if (!querySharedConfigSupported) {
+      return 'Shared community configuration is unavailable on this host. URL or legacy local configuration is read-only.';
+    }
+    if (!checkCapabilitiesSupported || !publishSharedConfigSupported) {
+      return 'Shared configuration editing is disabled because this host does not support the required moderator check and publish actions.';
+    }
+    return '';
+  });
 
-  const calendarEventAddress = (event: NostrEvent) => {
-    const identifier = tagValue(event, 'd');
+  const requestErrorText = $derived.by(() => {
+    const failures = [
+      ['configuration', configRequest],
+      ['calendar events', eventsRequest],
+      ['moderator access', capabilitiesRequest],
+    ] as const;
+    return failures
+      .filter(([, request]) => request.phase === 'error')
+      .map(([label, request]) => `${label}: ${request.error}`)
+      .join(' ');
+  });
 
-    return identifier ? `${event.kind}:${event.pubkey}:${identifier}` : '';
-  };
-
-  const getEventConfigRef = (event: NostrEvent) => calendarEventAddress(event) || event.id;
-
-  const getEventRefs = (event: NostrEvent) =>
-    [calendarEventAddress(event), tagValue(event, 'd'), event.id].filter(Boolean);
-
-  const matchesEventRef = (event: NostrEvent, ref: string) =>
-    Boolean(ref && getEventRefs(event).includes(ref));
+  const hasRequestError = $derived(Boolean(requestErrorText));
+  const blockingLoadError = $derived(
+    isBlockingRequestError(configRequest) ||
+      isBlockingRequestError(eventsRequest, config.eventRefs.length > 0)
+  );
+  const waitingForInitialData = $derived(
+    (!configRequest.hasValue &&
+      (configRequest.phase === 'idle' ||
+        configRequest.phase === 'loading' ||
+        configRequest.phase === 'retrying')) ||
+      (configRequest.hasValue &&
+        config.eventRefs.length > 0 &&
+        !eventsRequest.hasValue &&
+        (eventsRequest.phase === 'idle' ||
+          eventsRequest.phase === 'loading' ||
+          eventsRequest.phase === 'retrying'))
+  );
 
   const sortedEvents = $derived.by(() =>
     [...events].sort((a, b) => (getEventStart(a) || 0) - (getEventStart(b) || 0))
@@ -132,34 +216,39 @@
     sortedEvents.filter((event) => config.eventRefs.some((ref) => matchesEventRef(event, ref)))
   );
 
-  const normalizeWidgetConfig = (value: unknown): WidgetConfig | null => {
-    if (!value || typeof value !== 'object') return null;
+  const readLegacyLocalConfig = (ctx: CommunityWidgetContext): WidgetConfig | null => {
+    for (const prefix of LEGACY_STORAGE_PREFIXES) {
+      try {
+        const raw = localStorage.getItem(`${prefix}${ctx.pubkey}`);
+        const normalized = raw ? normalizeWidgetConfig(JSON.parse(raw)) : null;
+        if (normalized) return normalized;
+      } catch {
+        // Continue to the other historical prefix.
+      }
+    }
+    return null;
+  };
 
-    const partial = value as Partial<WidgetConfig> & {eventRef?: unknown};
-    const eventRefs = normalizeEventRefs(
-      partial.eventRefs?.length ? partial.eventRefs : [partial.eventRef]
-    );
-    if (!eventRefs.length) return null;
-
+  const getFallbackConfig = (ctx: CommunityWidgetContext) => {
+    if (hasUrlConfig) {
+      return {config: initialUrlConfig, status: 'Using featured events from widget URL.'};
+    }
+    const legacyConfig = readLegacyLocalConfig(ctx);
+    if (legacyConfig) {
+      return {config: legacyConfig, status: 'Using migrated featured event configuration.'};
+    }
     return {
-      header: partial.header?.trim() || DEFAULT_HEADER,
-      eventRefs,
+      config: {header: DEFAULT_HEADER, eventRefs: []},
+      status: 'No featured events configured yet.',
     };
   };
 
-  const readLegacyLocalConfig = (ctx: CommunityWidgetContext): WidgetConfig | null => {
-    try {
-      const raw = localStorage.getItem(`${LEGACY_STORAGE_PREFIX}${ctx.pubkey}`);
-      return raw ? normalizeWidgetConfig(JSON.parse(raw)) : null;
-    } catch {
-      return null;
-    }
-  };
-
-  const applyConfig = (next: WidgetConfig) => {
+  const applyConfig = (next: WidgetConfig, preserveDraft = false) => {
     config = {header: next.header, eventRefs: [...next.eventRefs]};
-    headerInput = next.header;
-    selectedEventRefs = [...next.eventRefs];
+    if (!preserveDraft) {
+      headerInput = next.header;
+      selectedEventRefs = [...next.eventRefs];
+    }
   };
 
   const selectedEventCountText = $derived(
@@ -177,11 +266,10 @@
     const ref = getEventConfigRef(event);
     if (!ref) return;
 
-    const eventRefs = getEventRefs(event);
-    const selected = selectedEventRefs.some((selectedRef) => eventRefs.includes(selectedRef));
+    const selected = selectedEventRefs.some((selectedRef) => matchesEventRef(event, selectedRef));
 
     selectedEventRefs = selected
-      ? selectedEventRefs.filter((selectedRef) => !eventRefs.includes(selectedRef))
+      ? selectedEventRefs.filter((selectedRef) => !matchesEventRef(event, selectedRef))
       : [...selectedEventRefs, ref];
   }
 
@@ -283,7 +371,8 @@
     response.contextSessionId === expectedContext.contextSessionId &&
     response.contextVersion === expectedContext.contextVersion;
 
-  const contextIsCurrent = (expectedContext: CommunityWidgetContext) =>
+  const contextIsCurrent = (expectedContext: CommunityWidgetContext, generation = contextGeneration) =>
+    generation === contextGeneration &&
     getCommunityContextKey(communityContext) === getCommunityContextKey(expectedContext);
 
   const normalizeTheme = (value: unknown): WidgetTheme => (value === 'dark' ? 'dark' : 'light');
@@ -340,154 +429,456 @@
 
   async function startEditing() {
     editing = true;
-    void loadCalendarEvents(communityContext, {refs: []});
+    void loadCalendarEvents(communityContext, {refs: [], broad: true, background: true});
     await tick();
     configPanelElement?.scrollIntoView({behavior: 'smooth', block: 'start'});
   }
 
-  async function refreshCalendarCapabilities(ctx = communityContext) {
+  const isRequestBusy = (request: RequestState) =>
+    request.phase === 'loading' || request.phase === 'retrying';
+
+  const staleResponseError = {
+    error: 'The host returned data for an older community context.',
+    code: 'COMMUNITY_CONTEXT_NOT_READY',
+  };
+
+  const markRuntimeUnsupported = (action: HostCapabilityAction) => {
+    if (!runtimeUnsupportedActions.includes(action)) {
+      runtimeUnsupportedActions = [...runtimeUnsupportedActions, action];
+    }
+  };
+
+  const filterCalendarEvents = (value: unknown) =>
+    collapseCalendarEventReplacements(Array.isArray(value) ? (value as NostrEvent[]) : []);
+
+  const handleCapabilitiesFailure = (
+    value: unknown,
+    ctx: CommunityWidgetContext,
+    generation: number,
+    runId: number,
+    attempt: number
+  ) => {
+    if (isUnsupportedCapabilityError(value)) {
+      markRuntimeUnsupported('community:checkWriteCapabilities');
+      pendingCapabilitiesRefresh = false;
+      capabilitiesRequest = unavailableRequest(
+        capabilitiesRequest,
+        'This host does not support community moderator capability checks.'
+      );
+      status = 'Calendar configuration access is unavailable on this host.';
+      return;
+    }
+
+    const failure = failRequest(capabilitiesRequest, value);
+    capabilitiesRequest = failure.state;
+    if (failure.retryDelayMs !== null) {
+      status = 'Waiting for community moderator access to become ready...';
+      capabilitiesRetryTimer = setTimeout(() => {
+        capabilitiesRetryTimer = undefined;
+        if (contextIsCurrent(ctx, generation) && runId === capabilitiesRunId) {
+          void refreshCalendarCapabilities(ctx, {attempt: attempt + 1, runId, background: true});
+        }
+      }, failure.retryDelayMs);
+    } else {
+      pendingCapabilitiesRefresh = false;
+      status = 'Unable to check calendar configuration access.';
+    }
+  };
+
+  async function refreshCalendarCapabilities(
+    ctx = communityContext,
+    options: LoadRequestOptions = {}
+  ) {
     if (!bridge || !ctx) return;
+    if (!checkCapabilitiesSupported) {
+      capabilitiesRequest = unavailableRequest(
+        capabilitiesRequest,
+        'This host does not support community moderator capability checks.'
+      );
+      return;
+    }
+
+    const retryingRun = options.runId !== undefined;
+    if (isRequestBusy(capabilitiesRequest) && !retryingRun) {
+      if (capabilitiesRequest.phase === 'loading') pendingCapabilitiesRefresh = true;
+      return;
+    }
 
     const expectedContext = ctx;
+    const generation = contextGeneration;
+    const runId = options.runId ?? ++capabilitiesRunId;
+    const attempt = options.attempt ?? 1;
+    if (runId !== capabilitiesRunId || !contextIsCurrent(expectedContext, generation)) return;
+    if (capabilitiesRetryTimer) clearTimeout(capabilitiesRetryTimer);
+    capabilitiesRetryTimer = undefined;
+    capabilitiesRequest = beginRequest(capabilitiesRequest, attempt);
+    if (!options.background && !capabilitiesRequest.hasValue) {
+      status = 'Checking calendar configuration access...';
+    }
+
+    const requestBridge = bridge;
     try {
-      const res = await bridge.request('community:checkWriteCapabilities', {
+      const res = await requestBridge.request('community:checkWriteCapabilities', {
         descriptors: CALENDAR_DESCRIPTORS,
       });
-
-      if (!contextIsCurrent(expectedContext)) return;
-
+      if (
+        !contextIsCurrent(expectedContext, generation) ||
+        runId !== capabilitiesRunId
+      ) {
+        return;
+      }
       if ('error' in res) {
-        error = res.error;
-        status = 'Unable to check calendar configuration access.';
+        handleCapabilitiesFailure(res, expectedContext, generation, runId, attempt);
+        return;
+      }
+      if (!responseMatchesContext(res, expectedContext)) {
+        handleCapabilitiesFailure(staleResponseError, expectedContext, generation, runId, attempt);
         return;
       }
 
-      if (!responseMatchesContext(res, expectedContext)) return;
-
-      calendarCapabilities = res.capabilities;
+      calendarCapabilities = Array.isArray(res.capabilities) ? res.capabilities : [];
+      capabilitiesRequest = completeRequest(capabilitiesRequest);
     } catch (err) {
-      if (!contextIsCurrent(expectedContext)) return;
-      error = err instanceof Error ? err.message : String(err);
-      status = 'Unable to check calendar configuration access.';
+      if (contextIsCurrent(expectedContext, generation) && runId === capabilitiesRunId) {
+        handleCapabilitiesFailure(err, expectedContext, generation, runId, attempt);
+      }
+    } finally {
+      if (
+        contextIsCurrent(expectedContext, generation) &&
+        runId === capabilitiesRunId &&
+        capabilitiesRequest.phase === 'success' &&
+        pendingCapabilitiesRefresh
+      ) {
+        pendingCapabilitiesRefresh = false;
+        queueMicrotask(() => void refreshCalendarCapabilities(expectedContext, {background: true}));
+      }
     }
   }
 
-  async function loadSharedConfig(ctx = communityContext) {
-    if (!bridge || !ctx || loadingConfig) return;
+  const handleConfigFailure = (
+    value: unknown,
+    ctx: CommunityWidgetContext,
+    generation: number,
+    runId: number,
+    attempt: number
+  ) => {
+    if (isUnsupportedCapabilityError(value)) {
+      markRuntimeUnsupported('community:querySharedConfig');
+      pendingConfigRefresh = false;
+      editing = false;
+      applyFallbackConfiguration(ctx, true);
+      return;
+    }
+
+    const failure = failRequest(configRequest, value);
+    configRequest = failure.state;
+    if (failure.retryDelayMs !== null) {
+      status = 'Waiting for featured events configuration to become ready...';
+      configRetryTimer = setTimeout(() => {
+        configRetryTimer = undefined;
+        if (contextIsCurrent(ctx, generation) && requestEpochIsCurrent(runId, configRunId)) {
+          void loadSharedConfig(ctx, {attempt: attempt + 1, runId, background: true});
+        }
+      }, failure.retryDelayMs);
+    } else {
+      pendingConfigRefresh = false;
+      status = 'Unable to load featured events configuration.';
+    }
+  };
+
+  const loadEventsForConfig = (
+    ctx: CommunityWidgetContext,
+    nextConfig: WidgetConfig,
+    background = false
+  ) => {
+    void loadCalendarEvents(ctx, {
+      refs: editing ? [] : nextConfig.eventRefs,
+      broad: editing,
+      background,
+    });
+  };
+
+  const applyFallbackConfiguration = (ctx: CommunityWidgetContext, unavailable = false) => {
+    const fallback = getFallbackConfig(ctx);
+    applyConfig(fallback.config, editing);
+    status = fallback.status;
+    configRequest = unavailable
+      ? unavailableRequest(
+          configRequest,
+          'This host does not support shared community configuration.',
+          true
+        )
+      : completeRequest(configRequest);
+    loadEventsForConfig(ctx, fallback.config, eventsRequest.hasValue);
+  };
+
+  async function loadSharedConfig(ctx = communityContext, options: LoadRequestOptions = {}) {
+    if (!bridge || !ctx) return;
+    if (savingConfig) {
+      pendingConfigRefresh = true;
+      return;
+    }
+    if (!querySharedConfigSupported) {
+      applyFallbackConfiguration(ctx, true);
+      return;
+    }
+
+    const retryingRun = options.runId !== undefined;
+    if (isRequestBusy(configRequest) && !retryingRun) {
+      if (configRequest.phase === 'loading') pendingConfigRefresh = true;
+      return;
+    }
 
     const expectedContext = ctx;
-    loadingConfig = true;
-    error = '';
-    status = 'Loading featured events configuration...';
+    const generation = contextGeneration;
+    if (options.runId === undefined) configRunId = advanceRequestEpoch(configRunId);
+    const runId = options.runId ?? configRunId;
+    const attempt = options.attempt ?? 1;
+    if (!requestEpochIsCurrent(runId, configRunId) || !contextIsCurrent(expectedContext, generation)) {
+      return;
+    }
+    if (configRetryTimer) clearTimeout(configRetryTimer);
+    configRetryTimer = undefined;
+    configRequest = beginRequest(configRequest, attempt);
+    if (!options.background && !configRequest.hasValue) {
+      status = 'Loading featured events configuration...';
+    }
 
+    const requestBridge = bridge;
     try {
-      const res = await bridge.request('community:querySharedConfig', {
+      const res = await requestBridge.request('community:querySharedConfig', {
         namespace: CONFIG_NAMESPACE,
         key: CONFIG_KEY,
         descriptors: CALENDAR_DESCRIPTORS,
         limit: 100,
       });
-
-      if (!contextIsCurrent(expectedContext)) return;
-
+      if (
+        !contextIsCurrent(expectedContext, generation) ||
+        !requestEpochIsCurrent(runId, configRunId)
+      ) {
+        return;
+      }
       if ('error' in res) {
-        error = res.error;
-        status = isTransientCommunityError(res)
-          ? 'Loading community permissions and featured events configuration...'
-          : 'Unable to load featured events configuration.';
-        if (isTransientCommunityError(res)) retryConfig(expectedContext);
+        handleConfigFailure(res, expectedContext, generation, runId, attempt);
+        return;
+      }
+      if (!responseMatchesContext(res, expectedContext)) {
+        handleConfigFailure(staleResponseError, expectedContext, generation, runId, attempt);
         return;
       }
 
-      if (!responseMatchesContext(res, expectedContext)) return;
-
-      const sharedConfig = normalizeWidgetConfig(res.config);
-      const legacyConfig = readLegacyLocalConfig(expectedContext);
-      let nextConfig: WidgetConfig;
-      if (sharedConfig) {
-        nextConfig = sharedConfig;
+      const fallback = getFallbackConfig(expectedContext);
+      const sharedConfig = resolveSharedWidgetConfig(
+        res,
+        fallback.config,
+        configRequest.hasValue ? config : null
+      );
+      const nextConfig = sharedConfig.config;
+      if (sharedConfig.status === 'valid') {
         status = 'Featured events configuration loaded.';
-      } else if (hasUrlConfig) {
-        nextConfig = initialUrlConfig;
-        status = 'Using featured events from widget URL.';
-      } else if (legacyConfig) {
-        nextConfig = legacyConfig;
-        status = 'Using migrated featured event configuration.';
+      } else if (sharedConfig.status === 'invalid') {
+        const failure = failRequest(retainRequestValue(configRequest), {
+          error: 'The shared featured events configuration is malformed.',
+          code: 'INVALID_CONFIG',
+        });
+        applyConfig(nextConfig, editing);
+        configRequest = failure.state;
+        status =
+          sharedConfig.source === 'previous'
+            ? 'Shared featured events configuration is malformed. Showing the last loaded configuration.'
+            : `Shared featured events configuration is malformed. ${fallback.status}`;
+        loadEventsForConfig(expectedContext, nextConfig, options.background || eventsRequest.hasValue);
+        return;
       } else {
-        nextConfig = {header: DEFAULT_HEADER, eventRefs: []};
-        status = 'No featured events configured yet.';
+        status = fallback.status;
       }
-      configResolved = true;
-      configRetryCount = 0;
-      applyConfig(nextConfig);
-      void loadCalendarEvents(expectedContext, {refs: nextConfig.eventRefs});
+
+      applyConfig(nextConfig, editing);
+      configRequest = completeRequest(configRequest);
+      loadEventsForConfig(expectedContext, nextConfig, options.background || eventsRequest.hasValue);
     } catch (err) {
-      if (!contextIsCurrent(expectedContext)) return;
-      error = err instanceof Error ? err.message : String(err);
-      status = 'Unable to load featured events configuration.';
-      retryConfig(expectedContext);
+      if (
+        contextIsCurrent(expectedContext, generation) &&
+        requestEpochIsCurrent(runId, configRunId)
+      ) {
+        handleConfigFailure(err, expectedContext, generation, runId, attempt);
+      }
     } finally {
-      if (contextIsCurrent(expectedContext)) loadingConfig = false;
+      if (
+        contextIsCurrent(expectedContext, generation) &&
+        requestEpochIsCurrent(runId, configRunId) &&
+        configRequest.phase === 'success' &&
+        pendingConfigRefresh
+      ) {
+        pendingConfigRefresh = false;
+        queueMicrotask(() => void loadSharedConfig(expectedContext, {background: true}));
+      }
     }
   }
+
+  const getEventsLoadKey = (refs: string[], broad: boolean) => JSON.stringify([broad, refs]);
+
+  const handleEventsFailure = (
+    value: unknown,
+    ctx: CommunityWidgetContext,
+    generation: number,
+    runId: number,
+    attempt: number,
+    refs: string[],
+    broad: boolean
+  ) => {
+    if (isUnsupportedCapabilityError(value)) {
+      markRuntimeUnsupported('community:queryEvents');
+      pendingEventsLoad = null;
+      eventsRequest = unavailableRequest(
+        eventsRequest,
+        'This host does not support community calendar event queries.'
+      );
+      status = 'Community calendar events are unavailable on this host.';
+      return;
+    }
+
+    const failure = failRequest(eventsRequest, value);
+    eventsRequest = failure.state;
+    if (failure.retryDelayMs !== null) {
+      status = 'Waiting for community calendar events to become ready...';
+      eventsRetryTimer = setTimeout(() => {
+        eventsRetryTimer = undefined;
+        if (contextIsCurrent(ctx, generation) && runId === eventsRunId) {
+          void loadCalendarEvents(ctx, {
+            refs,
+            broad,
+            attempt: attempt + 1,
+            runId,
+            background: true,
+          });
+        }
+      }, failure.retryDelayMs);
+    } else {
+      status = 'Unable to load calendar events.';
+    }
+  };
 
   async function loadCalendarEvents(
     ctx = communityContext,
     options: LoadCalendarEventsOptions = {}
   ) {
-    if (!bridge || !ctx || loadingEvents) return;
+    if (!bridge || !ctx) return;
+    if (!queryEventsSupported) {
+      eventsRequest = unavailableRequest(
+        eventsRequest,
+        'This host does not support community calendar event queries.'
+      );
+      return;
+    }
+
+    const refs = normalizeEventRefs(options.refs ?? config.eventRefs);
+    const broad = options.broad === true;
+    const loadKey = getEventsLoadKey(refs, broad);
+    const retryingRun = options.runId !== undefined;
+    if (isRequestBusy(eventsRequest) && !retryingRun) {
+      if (eventsRequest.phase === 'loading' || loadKey !== currentEventsLoadKey) {
+        pendingEventsLoad = {refs, broad, background: true};
+      }
+      return;
+    }
 
     const expectedContext = ctx;
-    const refs = options.refs ?? config.eventRefs;
-    loadingEvents = true;
-    error = '';
-    status = 'Loading community calendar events...';
+    const generation = contextGeneration;
+    const runId = options.runId ?? ++eventsRunId;
+    const attempt = options.attempt ?? 1;
+    if (runId !== eventsRunId || !contextIsCurrent(expectedContext, generation)) return;
+    if (eventsRetryTimer) clearTimeout(eventsRetryTimer);
+    eventsRetryTimer = undefined;
+    currentEventsLoadKey = loadKey;
 
-    try {
-      const res = await bridge.request('community:queryEvents', {
+    if (!refs.length && !broad) {
+      events = [];
+      eventsRequest = completeRequest(eventsRequest);
+      status = 'No featured events configured yet.';
+      return;
+    }
+
+    eventsRequest = beginRequest(eventsRequest, attempt);
+    if (!options.background && !eventsRequest.hasValue) {
+      status = 'Loading community calendar events...';
+    }
+
+    const requestBridge = bridge;
+    const queryEvents = async (exactRefs?: string[]) => {
+      const res = await requestBridge.request('community:queryEvents', {
         descriptors: CALENDAR_DESCRIPTORS,
         limit: 500,
-        ...(refs.length ? {refs} : {}),
+        ...(exactRefs?.length ? {refs: exactRefs} : {}),
       });
+      if (!contextIsCurrent(expectedContext, generation) || runId !== eventsRunId) return null;
+      if ('error' in res) throw res;
+      if (!responseMatchesContext(res, expectedContext)) throw staleResponseError;
+      return filterCalendarEvents(res.events);
+    };
 
-      if (!contextIsCurrent(expectedContext)) return;
+    try {
+      const initialPlan = planEventQueries(refs);
+      const exactEvents = initialPlan.canonicalRefs.length
+        ? await queryEvents(initialPlan.canonicalRefs)
+        : [];
+      if (exactEvents === null) return;
 
-      if ('error' in res) {
-        error = res.error;
-        status = isTransientCommunityError(res)
-          ? 'Loading community calendar events...'
-          : 'Unable to load calendar events.';
-        if (isTransientCommunityError(res)) retryEvents(expectedContext, refs);
-        return;
+      if (exactEvents.length) {
+        events = mergeCalendarEventsForRefs(refs, events, exactEvents);
+        eventsRequest = retainRequestValue(eventsRequest);
       }
+      const resolvedPlan = planEventQueries(refs, exactEvents);
+      const broadEvents = broad || resolvedPlan.needsBroadDiscovery ? await queryEvents() : [];
+      if (broadEvents === null) return;
 
-      if (!responseMatchesContext(res, expectedContext)) return;
-
-      events = res.events.filter((event) => event.kind === EVENT_TIME || event.kind === EVENT_DATE);
-      eventsResolved = true;
-      eventsRetryCount = 0;
+      events = mergeCalendarEventsForRefs(refs, exactEvents, broadEvents);
+      eventsRequest = completeRequest(eventsRequest);
       status = events.length ? '' : 'No events found.';
     } catch (err) {
-      if (!contextIsCurrent(expectedContext)) return;
-      error = err instanceof Error ? err.message : String(err);
-      status = 'Unable to load calendar events.';
-      retryEvents(expectedContext, refs);
+      if (contextIsCurrent(expectedContext, generation) && runId === eventsRunId) {
+        handleEventsFailure(err, expectedContext, generation, runId, attempt, refs, broad);
+      }
     } finally {
-      if (contextIsCurrent(expectedContext)) loadingEvents = false;
+      if (contextIsCurrent(expectedContext, generation) && runId === eventsRunId && pendingEventsLoad) {
+        const pending = pendingEventsLoad;
+        const pendingKey = getEventsLoadKey(normalizeEventRefs(pending.refs ?? []), pending.broad === true);
+        pendingEventsLoad = null;
+        if (eventsRequest.phase === 'success' || pendingKey !== currentEventsLoadKey) {
+          queueMicrotask(() => void loadCalendarEvents(expectedContext, pending));
+        }
+      }
     }
   }
+
+  const invalidateConfigQueries = () => {
+    configRunId = advanceRequestEpoch(configRunId);
+    if (configRetryTimer) clearTimeout(configRetryTimer);
+    configRetryTimer = undefined;
+    pendingConfigRefresh = false;
+    configRequest = configRequest.hasValue ? completeRequest(configRequest) : createRequestState();
+  };
+
+  const handleUnsupportedConfigPublish = () => {
+    markRuntimeUnsupported('community:publishSharedConfig');
+    editing = false;
+    error = '';
+    status = 'Shared configuration editing is unavailable on this host.';
+  };
 
   async function saveConfig() {
     if (!communityContext || !canConfigure) return;
 
     const expectedContext = communityContext;
+    const generation = contextGeneration;
 
     const next = {
       header: headerInput.trim() || DEFAULT_HEADER,
-      eventRefs: normalizeEventRefs(selectedEventRefs),
+      eventRefs: canonicalizeEventRefs(selectedEventRefs, events),
     };
 
     savingConfig = true;
+    invalidateConfigQueries();
     error = '';
     status = 'Saving featured events for this community...';
     let saved = false;
@@ -500,26 +891,46 @@
         config: next,
       });
 
-      if (!contextIsCurrent(expectedContext)) return;
+      if (!contextIsCurrent(expectedContext, generation)) return;
 
       if (!res || 'error' in res) {
+        if (res && isUnsupportedCapabilityError(res)) {
+          handleUnsupportedConfigPublish();
+          return;
+        }
         error = res?.error || 'Unable to save featured events configuration.';
         status = 'Unable to save featured events configuration.';
         return;
       }
 
-      if (!responseMatchesContext(res, expectedContext)) return;
+      if (!responseMatchesContext(res, expectedContext)) {
+        error = staleResponseError.error;
+        status = 'Unable to save featured events configuration.';
+        return;
+      }
 
+      invalidateConfigQueries();
       applyConfig(next);
+      configRequest = completeRequest(configRequest);
       editing = false;
       status = 'Featured events saved for this community.';
       saved = true;
     } catch (err) {
-      if (!contextIsCurrent(expectedContext)) return;
+      if (!contextIsCurrent(expectedContext, generation)) return;
+      if (isUnsupportedCapabilityError(err)) {
+        handleUnsupportedConfigPublish();
+        return;
+      }
       error = err instanceof Error ? err.message : String(err);
       status = 'Unable to save featured events configuration.';
     } finally {
-      if (contextIsCurrent(expectedContext)) savingConfig = false;
+      if (contextIsCurrent(expectedContext, generation)) {
+        savingConfig = false;
+        if (!saved && pendingConfigRefresh) {
+          pendingConfigRefresh = false;
+          queueMicrotask(() => void loadSharedConfig(expectedContext, {background: true}));
+        }
+      }
     }
 
     if (saved) {
@@ -531,30 +942,116 @@
     }
   }
 
+  const refreshAll = (ctx = communityContext) => {
+    if (!ctx) return;
+    void refreshCalendarCapabilities(ctx, {background: true});
+    if (querySharedConfigSupported) {
+      void loadSharedConfig(ctx, {background: true});
+    } else if (configRequest.hasValue) {
+      void loadCalendarEvents(ctx, {
+        refs: editing ? [] : config.eventRefs,
+        broad: editing,
+        background: true,
+      });
+    }
+  };
+
+  const schedulePostInitRefresh = (ctx: CommunityWidgetContext) => {
+    const generation = contextGeneration;
+    postInitRefreshPoll.start(() => {
+      if (contextIsCurrent(ctx, generation)) {
+        refreshAll(ctx);
+      } else {
+        postInitRefreshPoll.stop();
+      }
+    });
+  };
+
+  const scheduleResumeRefresh = () => {
+    if (resumeRefreshTimer) clearTimeout(resumeRefreshTimer);
+    resumeRefreshTimer = setTimeout(() => {
+      resumeRefreshTimer = undefined;
+      refreshAll();
+    }, RESUME_REFRESH_DEBOUNCE_MS);
+  };
+
+  const retryFailedLoads = () => {
+    const ctx = communityContext;
+    if (!ctx) return;
+    if (capabilitiesRequest.phase === 'error') {
+      void refreshCalendarCapabilities(ctx);
+    }
+    if (configRequest.phase === 'error') void loadSharedConfig(ctx);
+    if (eventsRequest.phase === 'error') {
+      void loadCalendarEvents(ctx, {
+        refs: editing ? [] : config.eventRefs,
+        broad: editing,
+      });
+    }
+  };
+
+  const reconcileHostCapabilityPolicy = (ctx: CommunityWidgetContext) => {
+    if (!checkCapabilitiesSupported) {
+      capabilitiesRunId += 1;
+      if (capabilitiesRetryTimer) clearTimeout(capabilitiesRetryTimer);
+      capabilitiesRetryTimer = undefined;
+      capabilitiesRequest = unavailableRequest(
+        capabilitiesRequest,
+        'This host does not support community moderator capability checks.'
+      );
+    }
+    if (!queryEventsSupported) {
+      eventsRunId += 1;
+      if (eventsRetryTimer) clearTimeout(eventsRetryTimer);
+      eventsRetryTimer = undefined;
+      eventsRequest = unavailableRequest(
+        eventsRequest,
+        'This host does not support community calendar event queries.'
+      );
+    }
+    if (!querySharedConfigSupported && configRequest.phase !== 'unavailable') {
+      configRunId = advanceRequestEpoch(configRunId);
+      if (configRetryTimer) clearTimeout(configRetryTimer);
+      configRetryTimer = undefined;
+      applyFallbackConfiguration(ctx, true);
+    }
+  };
+
+  const startContextLoads = (ctx: CommunityWidgetContext) => {
+    reconcileHostCapabilityPolicy(ctx);
+    if (checkCapabilitiesSupported) void refreshCalendarCapabilities(ctx);
+    if (querySharedConfigSupported) void loadSharedConfig(ctx);
+    schedulePostInitRefresh(ctx);
+  };
+
   function applyCommunityContext(nextContext: CommunityWidgetContext | null) {
+    contextGeneration += 1;
+    configRunId = advanceRequestEpoch(configRunId);
+    eventsRunId += 1;
+    capabilitiesRunId += 1;
     communityContext = nextContext;
     calendarCapabilities = [];
     events = [];
     error = '';
-    loadingConfig = false;
-    loadingEvents = false;
-    configResolved = false;
-    eventsResolved = false;
-    configRetryCount = 0;
-    eventsRetryCount = 0;
+    configRequest = createRequestState();
+    eventsRequest = createRequestState();
+    capabilitiesRequest = createRequestState();
     clearLoadRetries();
+    clearRefreshTimers();
+    pendingConfigRefresh = false;
+    pendingCapabilitiesRefresh = false;
+    pendingEventsLoad = null;
+    currentEventsLoadKey = '';
     savingConfig = false;
     editing = false;
+    lastRequestedHeight = 0;
 
-    const resetConfig = () => {
-      applyConfig(initialUrlConfig);
-    };
-
-    if (!communityContext || hasUrlConfig) {
-      resetConfig();
-    } else {
-      applyConfig({header: DEFAULT_HEADER, eventRefs: []});
-    }
+    applyConfig({header: DEFAULT_HEADER, eventRefs: []});
+    status = nextContext
+      ? `Connected to community context ${getCommunityContextKey(nextContext)}.`
+      : 'Waiting for BudaBit community context...';
+    if (nextContext) startContextLoads(nextContext);
+    scheduleHostResize();
   }
 
   $effect(() => {
@@ -602,10 +1099,24 @@
   });
 
   $effect(() => {
+    window.addEventListener('pageshow', scheduleResumeRefresh);
+    window.addEventListener('focus', scheduleResumeRefresh);
+    window.addEventListener('online', scheduleResumeRefresh);
+
+    return () => {
+      window.removeEventListener('pageshow', scheduleResumeRefresh);
+      window.removeEventListener('focus', scheduleResumeRefresh);
+      window.removeEventListener('online', scheduleResumeRefresh);
+      if (resumeRefreshTimer) clearTimeout(resumeRefreshTimer);
+      resumeRefreshTimer = undefined;
+    };
+  });
+
+  $effect(() => {
     const b = createWidgetBridge({
       targetWindow: window.parent,
       targetOrigin: '*',
-      timeoutMs: 15000,
+      timeoutMs: BRIDGE_TIMEOUT_MS,
     });
 
     bridge = b;
@@ -613,27 +1124,38 @@
     const offInit = b.onEvent('widget:init', (payload) => {
       initPayload = payload;
       applyTheme(payload.theme, payload.themeBackground);
-      applyCommunityContext(payload.communityContext ?? null);
-      lastRequestedHeight = 0;
-
-      status = communityContext
-        ? `Connected to community context ${getCommunityContextKey(communityContext)}.`
-        : 'Waiting for BudaBit community context...';
-      void refreshCalendarCapabilities(communityContext);
-      void loadSharedConfig(communityContext);
-      scheduleHostResize();
+      const catalog = getHostCapabilityCatalog(payload);
+      if (catalog !== null) {
+        hostCapabilityCatalog = catalog;
+        runtimeUnsupportedActions = [];
+      } else if (hostCapabilityCatalog === null) {
+        hostCapabilityCatalog = null;
+      }
+      const nextContext = payload.communityContext ?? null;
+      if (
+        nextContext &&
+        communityContext &&
+        getCommunityContextKey(nextContext) === getCommunityContextKey(communityContext)
+      ) {
+        reconcileHostCapabilityPolicy(communityContext);
+        schedulePostInitRefresh(communityContext);
+        return;
+      }
+      if (!nextContext && !communityContext) return;
+      applyCommunityContext(nextContext);
     });
 
     const offCommunityChanged = b.onEvent('community:contextChanged', (payload) => {
-      applyCommunityContext(payload.communityContext ?? null);
-      lastRequestedHeight = 0;
-
-      status = communityContext
-        ? `Community context updated to ${getCommunityContextKey(communityContext)}.`
-        : 'Waiting for BudaBit community context...';
-      void refreshCalendarCapabilities(communityContext);
-      void loadSharedConfig(communityContext);
-      scheduleHostResize();
+      const nextContext = payload.communityContext ?? null;
+      if (
+        nextContext &&
+        communityContext &&
+        getCommunityContextKey(nextContext) === getCommunityContextKey(communityContext)
+      ) {
+        schedulePostInitRefresh(communityContext);
+        return;
+      }
+      applyCommunityContext(nextContext);
     });
 
     const offThemeChanged = b.onEvent('widget:themeChanged', (payload) => {
@@ -648,6 +1170,7 @@
       offThemeChanged();
       b.destroy();
       clearLoadRetries();
+      clearRefreshTimers();
       bridge = null;
     };
   });
@@ -660,7 +1183,12 @@
       <p>{status}</p>
     </section>
   {:else}
-    {#if selectedEvents.length}
+    {#if !queryEventsSupported}
+      <section class="panel warning">
+        <strong>{config.header || DEFAULT_HEADER}</strong>
+        <p>{compatibilityMessage}</p>
+      </section>
+    {:else if selectedEvents.length}
       <section class="featured-events" aria-labelledby="featured-events-heading">
         <div class="event-heading">
           <p id="featured-events-heading" class="eyebrow">{config.header || DEFAULT_HEADER}</p>
@@ -698,11 +1226,16 @@
           {/each}
         </div>
       </section>
-    {:else if
-      loadingConfig ||
-      loadingEvents ||
-      !configResolved ||
-      (config.eventRefs.length > 0 && !eventsResolved)}
+    {:else if blockingLoadError}
+      <section class="panel warning">
+        <div class="config-heading">
+          <strong>{config.header || DEFAULT_HEADER}</strong>
+          <button type="button" class="secondary small" onclick={retryFailedLoads}>Retry</button>
+        </div>
+        <p>Unable to finish loading featured events.</p>
+        <p class="error">{requestErrorText}</p>
+      </section>
+    {:else if waitingForInitialData}
       <section class="panel muted">
         <strong>{config.header || DEFAULT_HEADER}</strong>
         <p>{status}</p>
@@ -729,6 +1262,22 @@
       </section>
     {/if}
 
+    {#if hasRequestError && !blockingLoadError}
+      <section class="panel warning load-recovery">
+        <div class="config-heading">
+          <strong>Some calendar data could not be refreshed.</strong>
+          <button type="button" class="secondary small" onclick={retryFailedLoads}>Retry</button>
+        </div>
+        <p class="error">{requestErrorText}</p>
+      </section>
+    {/if}
+
+    {#if compatibilityMessage && queryEventsSupported}
+      <section class="panel muted compatibility-note">
+        <p>{compatibilityMessage}</p>
+      </section>
+    {/if}
+
     {#if canConfigure && editing}
       <section class="config-panel" bind:this={configPanelElement}>
         <div class="config-heading">
@@ -737,7 +1286,7 @@
           </div>
           <button
             type="button"
-            onclick={() => loadCalendarEvents(communityContext, {refs: []})}
+            onclick={() => loadCalendarEvents(communityContext, {refs: [], broad: true})}
             disabled={loadingEvents}>
             {loadingEvents ? 'Loading...' : 'Refresh'}
           </button>
@@ -785,6 +1334,8 @@
                 </label>
               {/each}
             </div>
+          {:else if loadingEvents}
+            <p class="picker-empty">Loading calendar events...</p>
           {:else}
             <p class="picker-empty">No calendar events found.</p>
           {/if}
@@ -1032,6 +1583,11 @@
     margin-top: 12px;
     padding: 16px;
     background: var(--panel);
+  }
+
+  .load-recovery,
+  .compatibility-note {
+    margin-top: 12px;
   }
 
   .config-heading,

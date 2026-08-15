@@ -7,8 +7,9 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
+    "test": "vitest run",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json",
-    "check": "pnpm typecheck && pnpm build",
+    "check": "pnpm typecheck && pnpm test && pnpm build",
     "manifest:after": "node $(realpath node_modules/budabit-sdk/dist/manifest/cli.js) --title 'Featured Calendar Events' --type tool --app-url ${WIDGET_APP_URL:-https://example.com/budabit-calendar-widget/index.html} --icon 'https://blossom.budabit.club/daad5d8b18f221978a1609b2eefa511254c703b5914beda9184e6226b6527e18.svg' --image 'https://blossom.budabit.club/daad5d8b18f221978a1609b2eefa511254c703b5914beda9184e6226b6527e18.svg' --identifier 'featured-calendar-event' --version '0.2.7' --changelog 'Recover legacy featured event selections' --permissions 'community:checkWriteCapabilities,community:queryEvents,community:querySharedConfig,community:publishSharedConfig,ui:toast,ui:navigate,ui:resize' --slot-type 'community-home-after-quicklinks' --slot-label 'Featured events' --output 'dist/widget-after'",
     "manifest:before": "node $(realpath node_modules/budabit-sdk/dist/manifest/cli.js) --title 'Featured Calendar Events' --type tool --app-url ${WIDGET_APP_URL:-https://example.com/budabit-calendar-widget/index.html} --icon 'https://blossom.budabit.club/daad5d8b18f221978a1609b2eefa511254c703b5914beda9184e6226b6527e18.svg' --image 'https://blossom.budabit.club/daad5d8b18f221978a1609b2eefa511254c703b5914beda9184e6226b6527e18.svg' --identifier 'featured-calendar-event' --version '0.2.7' --changelog 'Recover legacy featured event selections' --permissions 'community:checkWriteCapabilities,community:queryEvents,community:querySharedConfig,community:publishSharedConfig,ui:toast,ui:navigate,ui:resize' --slot-type 'community-home-before-quicklinks' --slot-label 'Featured events' --output 'dist/widget-before'",
     "widget:build:after": "pnpm build && pnpm manifest:after",
@@ -26,7 +27,9 @@
   },
   "devDependencies": {
     "@tsconfig/svelte": "^5.0.4",
+    "@types/node": "^22.10.2",
     "svelte-check": "^4.1.4",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.4"
   }
 }
