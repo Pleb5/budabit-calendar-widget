@@ -6,11 +6,13 @@ Inline BudaBit Smart Widget for featuring one or more already-published communit
 
 - Renders in `community-home-before-quicklinks` or `community-home-after-quicklinks`.
 - Reads generic `communityContext` from BudaBit.
-- Queries events with `community:queryEvents` for descriptors `{kind: 31923}` and `{kind: 31922}`.
+- Queries events with `community:queryEvents` for descriptors `{kind: 31923}` and `{kind: 31922}`. Canonical IDs/addresses are fetched exactly first; unresolved and legacy `d` refs fall back to broad descriptor discovery.
 - Loads the current community-wide featured events with `community:querySharedConfig`.
 - Saves community-wide featured events config with `community:publishSharedConfig`; latest valid moderator-authored config wins.
 - Derives event publishing access and section moderator access separately with `community:checkWriteCapabilities` for those descriptors.
 - Reacts to `community:contextChanged` and ignores stale responses whose context version no longer matches.
+- Retries transient community readiness/timeouts with bounded backoff and refreshes after initialization or browser resume/network events without clearing the last successful view.
+- Uses an optional host capability catalog when present and honors runtime `UNSUPPORTED_CAPABILITY` responses from older hosts. Hosts without shared-config support use read-only URL/local fallback configuration; hosts without `community:queryEvents` cannot render this widget's content.
 - Shows all selected events to all viewers.
 - Gates only Edit/Configure controls to moderators of either time-based or date-based calendar event descriptors.
 
@@ -26,6 +28,8 @@ pnpm dev
 ```bash
 pnpm check
 ```
+
+`pnpm check` runs type checking, Vitest, and the production build. Tests can also be run alone with `pnpm test`.
 
 ## Local Build And Publish Test
 
@@ -44,7 +48,9 @@ WIDGET_APP_URL="https://cdn.example.com/budabit-calendar-widget/index.html" pnpm
 WIDGET_APP_URL="https://cdn.example.com/budabit-calendar-widget/index.html" pnpm manifest:before
 ```
 
-These scripts generate manifests for the below-quicklinks and above-quicklinks slots respectively.
+These scripts generate manifests for the below-quicklinks and above-quicklinks slots respectively. They are alternative placements of the same `featured-calendar-event` widget line, not variants to install simultaneously; choose one placement per installation.
+
+Both manifests declare shared configuration scope `budabit-calendar-widget=featured-calendar-event`.
 
 Dry-run publish commands:
 
