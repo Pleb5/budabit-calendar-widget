@@ -45,10 +45,6 @@
   const CALENDAR_DESCRIPTORS: CommunityEventDescriptor[] = [{kind: EVENT_TIME}, {kind: EVENT_DATE}];
   const CONFIG_NAMESPACE = 'budabit-calendar-widget';
   const CONFIG_KEY = 'featured-calendar-event';
-  const LEGACY_STORAGE_PREFIXES = [
-    'budabit-calendar-widget:config:',
-    'bubdabit-calendar-widget:config:',
-  ];
   const NO_CONFIG_TEXT = 'No featured events have been configured for this community yet.';
   const SUMMARY_MAX_LENGTH = 200;
   const POST_INIT_REFRESH_DELAYS_MS = [1500, 3000, 5000, 8000, 12000] as const;
@@ -216,26 +212,9 @@
     sortedEvents.filter((event) => config.eventRefs.some((ref) => matchesEventRef(event, ref)))
   );
 
-  const readLegacyLocalConfig = (ctx: CommunityWidgetContext): WidgetConfig | null => {
-    for (const prefix of LEGACY_STORAGE_PREFIXES) {
-      try {
-        const raw = localStorage.getItem(`${prefix}${ctx.pubkey}`);
-        const normalized = raw ? normalizeWidgetConfig(JSON.parse(raw)) : null;
-        if (normalized) return normalized;
-      } catch {
-        // Continue to the other historical prefix.
-      }
-    }
-    return null;
-  };
-
-  const getFallbackConfig = (ctx: CommunityWidgetContext) => {
+  const getFallbackConfig = () => {
     if (hasUrlConfig) {
       return {config: initialUrlConfig, status: 'Using featured events from widget URL.'};
-    }
-    const legacyConfig = readLegacyLocalConfig(ctx);
-    if (legacyConfig) {
-      return {config: legacyConfig, status: 'Using migrated featured event configuration.'};
     }
     return {
       config: {header: DEFAULT_HEADER, eventRefs: []},
@@ -332,7 +311,7 @@
     typeof initPayload?.appOrigin === 'string' ? initPayload.appOrigin.replace(/\/+$/, '') : '';
 
   const getEventPath = (event: NostrEvent) => {
-    const communityRoute = communityContext?.ncommunity || communityContext?.pubkey;
+    const communityRoute = communityContext?.naddr;
     const routeId = getEventRouteId(event);
 
     if (!communityRoute || !routeId) return '';
@@ -599,7 +578,7 @@
   };
 
   const applyFallbackConfiguration = (ctx: CommunityWidgetContext, unavailable = false) => {
-    const fallback = getFallbackConfig(ctx);
+    const fallback = getFallbackConfig();
     applyConfig(fallback.config, editing);
     status = fallback.status;
     configRequest = unavailable
@@ -667,7 +646,7 @@
         return;
       }
 
-      const fallback = getFallbackConfig(expectedContext);
+      const fallback = getFallbackConfig();
       const sharedConfig = resolveSharedWidgetConfig(
         res,
         fallback.config,
