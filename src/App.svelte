@@ -1417,7 +1417,6 @@
           <button
             type="button"
             class="secondary"
-            onpointerdown={cancelEditing}
             onclick={cancelEditing}
             disabled={savingConfig}
           >
