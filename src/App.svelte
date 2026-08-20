@@ -444,6 +444,17 @@
     configPanelElement?.scrollIntoView({behavior: 'smooth', block: 'start'});
   }
 
+  async function cancelEditing(event?: Event) {
+    event?.preventDefault();
+    if (savingConfig || !editing) return;
+
+    headerInput = config.header;
+    selectedEventRefs = [...config.eventRefs];
+    editing = false;
+    await tick();
+    scheduleHostResize();
+  }
+
   const isRequestBusy = (request: RequestState) =>
     request.phase === 'loading' || request.phase === 'retrying';
 
@@ -1409,7 +1420,8 @@
           <button
             type="button"
             class="secondary"
-            onclick={() => (editing = false)}
+            onpointerdown={cancelEditing}
+            onclick={cancelEditing}
             disabled={savingConfig}
           >
             Cancel
