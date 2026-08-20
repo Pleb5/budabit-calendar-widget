@@ -394,17 +394,10 @@
   };
 
   const getContentHeight = () => {
-    const mainHeight = mainElement
-      ? Math.max(mainElement.scrollHeight, mainElement.getBoundingClientRect().height)
-      : 0;
+    if (!mainElement) return 1;
 
     return Math.ceil(
-      Math.max(
-        mainHeight,
-        document.body?.scrollHeight || 0,
-        document.documentElement?.scrollHeight || 0,
-        1
-      ) + 2
+      Math.max(mainElement.scrollHeight, mainElement.getBoundingClientRect().height, 1) + 2
     );
   };
 
@@ -433,7 +426,11 @@
   };
 
   async function startEditing() {
-    if (editing) return;
+    if (editing) {
+      await cancelEditing();
+      return;
+    }
+
     editing = true;
     void loadCalendarEvents(communityContext, {
       refs: [],
