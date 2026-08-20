@@ -25,6 +25,7 @@ import {
   requestEpochIsCurrent,
   resolveSharedWidgetConfig,
   retainRequestValue,
+  selectCalendarPickerEvents,
 } from './compatibility';
 
 const author = 'a'.repeat(64);
@@ -117,6 +118,34 @@ describe('calendar replacement collapse', () => {
         selectedId.id
       )
     ).toBe(true);
+  });
+
+  it('bounds picker candidates, drops completed events, and retains selected history', () => {
+    const completed = event({
+      id: '4'.repeat(64),
+      tags: [['d', 'completed'], ['start', '100'], ['end', '200']],
+    });
+    const selectedCompleted = event({
+      id: '3'.repeat(64),
+      tags: [['d', 'selected-completed'], ['start', '100'], ['end', '200']],
+    });
+    const upcoming = event({
+      id: '2'.repeat(64),
+      tags: [['d', 'upcoming'], ['start', '2000'], ['end', '2100']],
+    });
+    const later = event({
+      id: '5'.repeat(64),
+      tags: [['d', 'later'], ['start', '3000'], ['end', '3100']],
+    });
+
+    expect(
+      selectCalendarPickerEvents(
+        [completed, selectedCompleted, upcoming, later],
+        [selectedCompleted.id],
+        1000,
+        2
+      ).map(({id}) => id)
+    ).toEqual([selectedCompleted.id, upcoming.id]);
   });
 });
 

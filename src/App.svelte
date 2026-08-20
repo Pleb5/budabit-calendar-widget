@@ -35,6 +35,7 @@
     requestEpochIsCurrent,
     resolveSharedWidgetConfig,
     retainRequestValue,
+    selectCalendarPickerEvents,
     unavailableRequest,
     type HostCapabilityAction,
     type RequestState,
@@ -47,6 +48,7 @@
   const CONFIG_KEY = 'featured-calendar-event';
   const NO_CONFIG_TEXT = 'No featured events have been configured for this community yet.';
   const SUMMARY_MAX_LENGTH = 200;
+  const MAX_PICKER_EVENTS = 120;
   const POST_INIT_REFRESH_DELAYS_MS = [1500, 3000, 5000, 8000, 12000] as const;
   const RESUME_REFRESH_DEBOUNCE_MS = 300;
   const BRIDGE_TIMEOUT_MS = 60_000;
@@ -214,7 +216,10 @@
 
   const getFallbackConfig = () => {
     if (hasUrlConfig) {
-      return {config: initialUrlConfig, status: 'Using featured events from widget URL.'};
+      return {
+        config: initialUrlConfig,
+        status: 'Using featured events from widget URL.',
+      };
     }
     return {
       config: {header: DEFAULT_HEADER, eventRefs: []},
@@ -299,6 +304,15 @@
 
   const getEventSummary = (event: NostrEvent) => event.content.trim();
 
+  const pickerEvents = $derived(
+    selectCalendarPickerEvents(
+      events,
+      selectedEventRefs,
+      Math.floor(Date.now() / 1000),
+      MAX_PICKER_EVENTS
+    )
+  );
+
   const truncateText = (value: string, maxLength: number) =>
     value.length > maxLength ? `${value.slice(0, maxLength).trimEnd()}...` : value;
 
@@ -311,7 +325,15 @@
     typeof initPayload?.appOrigin === 'string' ? initPayload.appOrigin.replace(/\/+$/, '') : '';
 
   const getEventPath = (event: NostrEvent) => {
-    const communityRoute = communityContext?.naddr;
+    const publicContext = initPayload?.context as {community?: {naddr?: string}} | undefined;
+    const legacyContext = communityContext as
+      | (CommunityWidgetContext & {ncommunity?: string; pubkey?: string})
+      | null;
+    const communityRoute =
+      communityContext?.naddr ||
+      publicContext?.community?.naddr ||
+      legacyContext?.ncommunity ||
+      legacyContext?.pubkey;
     const routeId = getEventRouteId(event);
 
     if (!communityRoute || !routeId) return '';
@@ -350,7 +372,10 @@
     response.contextSessionId === expectedContext.contextSessionId &&
     response.contextVersion === expectedContext.contextVersion;
 
-  const contextIsCurrent = (expectedContext: CommunityWidgetContext, generation = contextGeneration) =>
+  const contextIsCurrent = (
+    expectedContext: CommunityWidgetContext,
+    generation = contextGeneration
+  ) =>
     generation === contextGeneration &&
     getCommunityContextKey(communityContext) === getCommunityContextKey(expectedContext);
 
@@ -387,7 +412,8 @@
     if (!bridge) return;
 
     const height = getContentHeight();
-    if (!Number.isFinite(height) || height <= 0 || Math.abs(height - lastRequestedHeight) < 2) return;
+    if (!Number.isFinite(height) || height <= 0 || Math.abs(height - lastRequestedHeight) < 2)
+      return;
 
     lastRequestedHeight = height;
     void bridge.request('ui:resize', {height}).catch(() => {
@@ -407,8 +433,13 @@
   };
 
   async function startEditing() {
+    if (editing) return;
     editing = true;
-    void loadCalendarEvents(communityContext, {refs: [], broad: true, background: true});
+    void loadCalendarEvents(communityContext, {
+      refs: [],
+      broad: true,
+      background: true,
+    });
     await tick();
     configPanelElement?.scrollIntoView({behavior: 'smooth', block: 'start'});
   }
@@ -455,7 +486,11 @@
       capabilitiesRetryTimer = setTimeout(() => {
         capabilitiesRetryTimer = undefined;
         if (contextIsCurrent(ctx, generation) && runId === capabilitiesRunId) {
-          void refreshCalendarCapabilities(ctx, {attempt: attempt + 1, runId, background: true});
+          void refreshCalendarCapabilities(ctx, {
+            attempt: attempt + 1,
+            runId,
+            background: true,
+          });
         }
       }, failure.retryDelayMs);
     } else {
@@ -500,10 +535,7 @@
       const res = await requestBridge.request('community:checkWriteCapabilities', {
         descriptors: CALENDAR_DESCRIPTORS,
       });
-      if (
-        !contextIsCurrent(expectedContext, generation) ||
-        runId !== capabilitiesRunId
-      ) {
+      if (!contextIsCurrent(expectedContext, generation) || runId !== capabilitiesRunId) {
         return;
       }
       if ('error' in res) {
@@ -529,7 +561,12 @@
         pendingCapabilitiesRefresh
       ) {
         pendingCapabilitiesRefresh = false;
-        queueMicrotask(() => void refreshCalendarCapabilities(expectedContext, {background: true}));
+        queueMicrotask(
+          () =>
+            void refreshCalendarCapabilities(expectedContext, {
+              background: true,
+            })
+        );
       }
     }
   }
@@ -556,7 +593,11 @@
       configRetryTimer = setTimeout(() => {
         configRetryTimer = undefined;
         if (contextIsCurrent(ctx, generation) && requestEpochIsCurrent(runId, configRunId)) {
-          void loadSharedConfig(ctx, {attempt: attempt + 1, runId, background: true});
+          void loadSharedConfig(ctx, {
+            attempt: attempt + 1,
+            runId,
+            background: true,
+          });
         }
       }, failure.retryDelayMs);
     } else {
@@ -570,9 +611,10 @@
     nextConfig: WidgetConfig,
     background = false
   ) => {
+    if (editing) return;
     void loadCalendarEvents(ctx, {
-      refs: editing ? [] : nextConfig.eventRefs,
-      broad: editing,
+      refs: nextConfig.eventRefs,
+      broad: false,
       background,
     });
   };
@@ -613,7 +655,10 @@
     if (options.runId === undefined) configRunId = advanceRequestEpoch(configRunId);
     const runId = options.runId ?? configRunId;
     const attempt = options.attempt ?? 1;
-    if (!requestEpochIsCurrent(runId, configRunId) || !contextIsCurrent(expectedContext, generation)) {
+    if (
+      !requestEpochIsCurrent(runId, configRunId) ||
+      !contextIsCurrent(expectedContext, generation)
+    ) {
       return;
     }
     if (configRetryTimer) clearTimeout(configRetryTimer);
@@ -666,7 +711,11 @@
           sharedConfig.source === 'previous'
             ? 'Shared featured events configuration is malformed. Showing the last loaded configuration.'
             : `Shared featured events configuration is malformed. ${fallback.status}`;
-        loadEventsForConfig(expectedContext, nextConfig, options.background || eventsRequest.hasValue);
+        loadEventsForConfig(
+          expectedContext,
+          nextConfig,
+          options.background || eventsRequest.hasValue
+        );
         return;
       } else {
         status = fallback.status;
@@ -674,7 +723,11 @@
 
       applyConfig(nextConfig, editing);
       configRequest = completeRequest(configRequest);
-      loadEventsForConfig(expectedContext, nextConfig, options.background || eventsRequest.hasValue);
+      loadEventsForConfig(
+        expectedContext,
+        nextConfig,
+        options.background || eventsRequest.hasValue
+      );
     } catch (err) {
       if (
         contextIsCurrent(expectedContext, generation) &&
@@ -756,7 +809,7 @@
     const loadKey = getEventsLoadKey(refs, broad);
     const retryingRun = options.runId !== undefined;
     if (isRequestBusy(eventsRequest) && !retryingRun) {
-      if (eventsRequest.phase === 'loading' || loadKey !== currentEventsLoadKey) {
+      if (loadKey !== currentEventsLoadKey) {
         pendingEventsLoad = {refs, broad, background: true};
       }
       return;
@@ -819,9 +872,16 @@
         handleEventsFailure(err, expectedContext, generation, runId, attempt, refs, broad);
       }
     } finally {
-      if (contextIsCurrent(expectedContext, generation) && runId === eventsRunId && pendingEventsLoad) {
+      if (
+        contextIsCurrent(expectedContext, generation) &&
+        runId === eventsRunId &&
+        pendingEventsLoad
+      ) {
         const pending = pendingEventsLoad;
-        const pendingKey = getEventsLoadKey(normalizeEventRefs(pending.refs ?? []), pending.broad === true);
+        const pendingKey = getEventsLoadKey(
+          normalizeEventRefs(pending.refs ?? []),
+          pending.broad === true
+        );
         pendingEventsLoad = null;
         if (eventsRequest.phase === 'success' || pendingKey !== currentEventsLoadKey) {
           queueMicrotask(() => void loadCalendarEvents(expectedContext, pending));
@@ -914,7 +974,10 @@
 
     if (saved) {
       try {
-        await bridge?.request('ui:toast', {message: 'Featured events saved', type: 'success'});
+        await bridge?.request('ui:toast', {
+          message: 'Featured events saved',
+          type: 'success',
+        });
       } catch {
         // Toast is best-effort.
       }
@@ -1062,7 +1125,10 @@
         scrollHideTimer = undefined;
       }, 900);
     };
-    const scrollOptions: AddEventListenerOptions = {capture: true, passive: true};
+    const scrollOptions: AddEventListenerOptions = {
+      capture: true,
+      passive: true,
+    };
 
     document.addEventListener('scroll', markScrolling, scrollOptions);
     window.addEventListener('wheel', markScrolling, {passive: true});
@@ -1170,7 +1236,9 @@
     {:else if selectedEvents.length}
       <section class="featured-events" aria-labelledby="featured-events-heading">
         <div class="event-heading">
-          <p id="featured-events-heading" class="eyebrow">{config.header || DEFAULT_HEADER}</p>
+          <p id="featured-events-heading" class="eyebrow">
+            {config.header || DEFAULT_HEADER}
+          </p>
           {#if canConfigure}
             <button type="button" class="secondary small" onclick={startEditing}>Edit</button>
           {/if}
@@ -1180,28 +1248,34 @@
           {#each selectedEvents as featuredEvent (featuredEvent.id)}
             {@const eventPath = getEventPath(featuredEvent)}
             {@const eventHref = getEventHref(featuredEvent)}
-            <article class="event-card">
-              <h1>
-                {#if eventHref}
-                  <a
-                    class="event-title-link"
-                    href={eventHref}
-                    target="_top"
-                    onclick={(event) => navigateToEvent(event, eventPath, eventHref)}>
-                    {getEventTitle(featuredEvent)}
-                  </a>
-                {:else}
-                  {getEventTitle(featuredEvent)}
+            {#if eventHref}
+              <a
+                class="event-card event-card-link"
+                href={eventHref}
+                target="_top"
+                onclick={(event) => navigateToEvent(event, eventPath, eventHref)}
+              >
+                <h1>{getEventTitle(featuredEvent)}</h1>
+                <p class="date">{formatEventDate(featuredEvent)}</p>
+                {#if tagValue(featuredEvent, 'location')}
+                  <p class="location">{tagValue(featuredEvent, 'location')}</p>
                 {/if}
-              </h1>
-              <p class="date">{formatEventDate(featuredEvent)}</p>
-              {#if tagValue(featuredEvent, 'location')}
-                <p class="location">{tagValue(featuredEvent, 'location')}</p>
-              {/if}
-              {#if getEventSummary(featuredEvent)}
-                <p class="summary">{getVisibleEventSummary(featuredEvent)}</p>
-              {/if}
-            </article>
+                {#if getEventSummary(featuredEvent)}
+                  <p class="summary">{getVisibleEventSummary(featuredEvent)}</p>
+                {/if}
+              </a>
+            {:else}
+              <article class="event-card">
+                <h1>{getEventTitle(featuredEvent)}</h1>
+                <p class="date">{formatEventDate(featuredEvent)}</p>
+                {#if tagValue(featuredEvent, 'location')}
+                  <p class="location">{tagValue(featuredEvent, 'location')}</p>
+                {/if}
+                {#if getEventSummary(featuredEvent)}
+                  <p class="summary">{getVisibleEventSummary(featuredEvent)}</p>
+                {/if}
+              </article>
+            {/if}
           {/each}
         </div>
       </section>
@@ -1266,7 +1340,8 @@
           <button
             type="button"
             onclick={() => loadCalendarEvents(communityContext, {refs: [], broad: true})}
-            disabled={loadingEvents}>
+            disabled={loadingEvents}
+          >
             {loadingEvents ? 'Loading...' : 'Refresh'}
           </button>
         </div>
@@ -1278,12 +1353,18 @@
 
         {#if unresolvedSelectedEventRefs.length}
           <div class="unresolved-events">
-            <p>These configured event refs were not found. Remove them or choose another event below.</p>
+            <p>
+              These configured event refs were not found. Remove them or choose another event below.
+            </p>
             <div class="missing-ref-list">
               {#each unresolvedSelectedEventRefs as ref (ref)}
                 <div class="missing-ref">
                   <code>{ref}</code>
-                  <button type="button" class="secondary small" onclick={() => removeSelectedEventRef(ref)}>
+                  <button
+                    type="button"
+                    class="secondary small"
+                    onclick={() => removeSelectedEventRef(ref)}
+                  >
                     Remove
                   </button>
                 </div>
@@ -1298,14 +1379,15 @@
             <span class="selected-count">{selectedEventCountText}</span>
           </div>
 
-          {#if sortedEvents.length}
+          {#if pickerEvents.length}
             <div class="event-options">
-              {#each sortedEvents as event (event.id)}
+              {#each pickerEvents as event (event.id)}
                 <label class="event-option">
                   <input
                     type="checkbox"
                     checked={isEventSelected(event)}
-                    onchange={() => toggleSelectedEvent(event)} />
+                    onchange={() => toggleSelectedEvent(event)}
+                  />
                   <span>
                     <strong>{getEventTitle(event)}</strong>
                     <span>{formatEventDate(event)}</span>
@@ -1324,7 +1406,12 @@
           <button type="button" onclick={saveConfig} disabled={savingConfig}>
             {savingConfig ? 'Saving...' : 'Save for community'}
           </button>
-          <button type="button" class="secondary" onclick={() => (editing = false)} disabled={savingConfig}>
+          <button
+            type="button"
+            class="secondary"
+            onclick={() => (editing = false)}
+            disabled={savingConfig}
+          >
             Cancel
           </button>
         </div>
@@ -1357,7 +1444,13 @@
     background: var(--host-background);
     color: var(--text);
     font-family:
-      Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      Inter,
+      ui-sans-serif,
+      system-ui,
+      -apple-system,
+      BlinkMacSystemFont,
+      'Segoe UI',
+      sans-serif;
     --accent: #ea580c;
     --accent-strong: #c2410c;
     --accent-muted: #7c2d12;
@@ -1510,16 +1603,23 @@
     line-height: 1.05;
   }
 
-  .event-title-link {
+  .event-card-link {
+    display: block;
     color: inherit;
     text-decoration: none;
+    cursor: pointer;
   }
 
-  .event-title-link:hover,
-  .event-title-link:focus-visible {
+  .event-card-link:hover h1,
+  .event-card-link:focus-visible h1 {
     color: var(--accent-strong);
     text-decoration: underline;
     text-underline-offset: 0.14em;
+  }
+
+  .event-card-link:focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
   }
 
   .date,

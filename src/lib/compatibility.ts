@@ -274,6 +274,54 @@ export const canonicalizeEventRefs = (refs: unknown, values: NostrEvent[]) => {
   return Array.from(new Set(canonical));
 };
 
+const parseCalendarTimestamp = (value: string) => {
+  if (!value) return undefined;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return numeric > 1_000_000_000_000 ? numeric / 1000 : numeric;
+  const parsed = Date.parse(value.length === 10 ? `${value}T00:00:00` : value);
+  return Number.isNaN(parsed) ? undefined : Math.floor(parsed / 1000);
+};
+
+export const getCalendarEventEnd = (event: NostrEvent) => {
+  const end =
+    parseCalendarTimestamp(eventTagValue(event, 'end')) ||
+    parseCalendarTimestamp(eventTagValue(event, 'start'));
+  return event.kind === EVENT_DATE && end ? end + 86_399 : end;
+};
+
+export const selectCalendarPickerEvents = (
+  values: NostrEvent[],
+  selectedRefs: unknown,
+  now: number,
+  maxEvents: number
+) => {
+  const refs = normalizeEventRefs(selectedRefs);
+  const isSelected = (event: NostrEvent) => refs.some((ref) => matchesEventRef(event, ref));
+  const selected = values.filter(isSelected);
+  const available = collapseCalendarEventReplacements(values).filter((event) => {
+    const end = getCalendarEventEnd(event);
+    return !end || end >= now;
+  });
+  const byAddress = new Map<string, NostrEvent>();
+
+  for (const event of [...selected, ...available]) {
+    const key = getEventConfigRef(event) || event.id;
+    if (!byAddress.has(key)) byAddress.set(key, event);
+  }
+
+  const merged = Array.from(byAddress.values()).sort(
+    (a, b) =>
+      (parseCalendarTimestamp(eventTagValue(a, 'start')) || 0) -
+      (parseCalendarTimestamp(eventTagValue(b, 'start')) || 0)
+  );
+  const selectedRows = merged.filter(isSelected);
+  const candidateRows = merged.filter((event) => !isSelected(event));
+  return [
+    ...selectedRows,
+    ...candidateRows.slice(0, Math.max(0, Math.floor(maxEvents) - selectedRows.length)),
+  ];
+};
+
 export const classifyCommunityError = (value: unknown) => {
   const record = asRecord(value);
   return typeof record?.code === 'string' && TRANSIENT_COMMUNITY_ERROR_CODES.has(record.code)
