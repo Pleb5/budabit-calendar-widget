@@ -14,10 +14,10 @@
     "manifest:before": "node $(realpath node_modules/budabit-sdk/dist/manifest/cli.js) --title 'Featured Calendar Events' --type tool --app-url ${WIDGET_APP_URL:-https://example.com/budabit-calendar-widget/index.html} --icon 'https://blossom.budabit.club/daad5d8b18f221978a1609b2eefa511254c703b5914beda9184e6226b6527e18.svg' --image 'https://blossom.budabit.club/daad5d8b18f221978a1609b2eefa511254c703b5914beda9184e6226b6527e18.svg' --identifier 'featured-calendar-event' --version '0.2.14' --changelog 'Fix calendar discovery, dates, navigation, and edit conflicts' --permissions 'community:checkWriteCapabilities,community:queryEvents,community:querySharedConfig,community:publishSharedConfig,ui:toast,ui:navigate,ui:resize' --shared-config 'budabit-calendar-widget=featured-calendar-event' --slot-type 'community-home-before-quicklinks' --slot-label 'Featured events' --output 'dist/widget-before'",
     "widget:build:after": "pnpm build && pnpm manifest:after",
     "widget:build:before": "pnpm build && pnpm manifest:before",
-    "widget:publish:after:dry-run": "pnpm widget:build:after && budabit-publish --event dist/widget-after/event.json --dry-run",
-    "widget:publish:before:dry-run": "pnpm widget:build:before && budabit-publish --event dist/widget-before/event.json --dry-run",
-    "widget:publish:after:blossom": "pnpm widget:build:after && budabit-publish --event dist/widget-after/event.json --upload-first --blossom ${BLOSSOM_SERVER:-https://blossom.primal.net} --artifact dist/index.html",
-    "widget:publish:before:blossom": "pnpm widget:build:before && budabit-publish --event dist/widget-before/event.json --upload-first --blossom ${BLOSSOM_SERVER:-https://blossom.primal.net} --artifact dist/index.html"
+    "widget:publish:after:dry-run": "pnpm widget:build:after && budabit-publish --event dist/widget-after/event.json --dry-run --relay ${COMMUNITY_RELAYS:?Set COMMUNITY_RELAYS to the tagged community relay URLs}",
+    "widget:publish:before:dry-run": "pnpm widget:build:before && budabit-publish --event dist/widget-before/event.json --dry-run --relay ${COMMUNITY_RELAYS:?Set COMMUNITY_RELAYS to the tagged community relay URLs}",
+    "widget:publish:after:blossom": "pnpm widget:build:after && budabit-publish --event dist/widget-after/event.json --upload-first --blossom ${BLOSSOM_SERVER:-https://blossom.primal.net} --artifact dist/index.html --relay ${COMMUNITY_RELAYS:?Set COMMUNITY_RELAYS to the tagged community relay URLs}",
+    "widget:publish:before:blossom": "pnpm widget:build:before && budabit-publish --event dist/widget-before/event.json --upload-first --blossom ${BLOSSOM_SERVER:-https://blossom.primal.net} --artifact dist/index.html --relay ${COMMUNITY_RELAYS:?Set COMMUNITY_RELAYS to the tagged community relay URLs}"
   },
   "dependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.3",

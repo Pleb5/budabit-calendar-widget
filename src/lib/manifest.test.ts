@@ -18,6 +18,16 @@ describe('widget manifest scripts', () => {
     );
   });
 
+  it('requires tagged community relays for every publish command', () => {
+    const publishScripts = Object.entries(packageJson.scripts)
+      .filter(([name]) => name.startsWith('widget:publish:'))
+      .map(([, script]) => script);
+    expect(publishScripts).toHaveLength(4);
+    publishScripts.forEach((script) =>
+      expect(script).toContain('--relay ${COMMUNITY_RELAYS:')
+    );
+  });
+
   it('keeps both placement alternatives on the existing widget identifier', () => {
     expect(after).toContain("--identifier 'featured-calendar-event'");
     expect(before).toContain("--identifier 'featured-calendar-event'");

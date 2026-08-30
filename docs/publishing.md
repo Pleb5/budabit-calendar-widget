@@ -20,6 +20,7 @@ Configuration is intentionally based on generic community context:
 - Publish shared configuration with the revision observed when editing began so compatible hosts can reject stale moderator drafts.
 - Treat catalog-declared or runtime `UNSUPPORTED_CAPABILITY` shared-config support as read-only URL/local fallback mode.
 - Treat the before/after manifest scripts as alternative placements of one widget identifier, not simultaneously installable variants.
+- Set `COMMUNITY_RELAYS` from the tagged community definition; standalone publishing has no hard-coded relay fallback.
 
 For legacy or read-only host fallback, publish the widget with an app URL containing one or more `event` params (`eventRef` is also read for older URLs):
 
