@@ -6,6 +6,7 @@ export const DEFAULT_HEADER = 'Featured events';
 export const MAX_REQUEST_ATTEMPTS = 4;
 
 const HEX_EVENT_ID = /^[0-9a-f]{64}$/i;
+const CALENDAR_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const TRANSIENT_COMMUNITY_ERROR_CODES = new Set([
   'COMMUNITY_CONTEXT_NOT_READY',
   'COMMUNITY_QUERY_TIMEOUT',
@@ -119,6 +120,49 @@ export const normalizeWidgetConfig = (value: unknown): WidgetConfig | null => {
 
 export const eventTagValue = (event: Pick<NostrEvent, 'tags'>, name: string) =>
   event.tags.find((tag) => Array.isArray(tag) && tag[0] === name)?.[1] || '';
+
+export const parseCalendarDate = (value: unknown) => {
+  if (typeof value !== 'string' || !CALENDAR_DATE.test(value)) return '';
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+    ? value
+    : '';
+};
+
+export const addCalendarDays = (value: string, days: number) => {
+  const date = parseCalendarDate(value);
+  if (!date) return '';
+  const [year, month, day] = date.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10);
+};
+
+export const getDateEventInclusiveEnd = (event: Pick<NostrEvent, 'tags'>) => {
+  const start = parseCalendarDate(eventTagValue(event, 'start'));
+  if (!start) return '';
+  const exclusiveEnd = parseCalendarDate(eventTagValue(event, 'end'));
+  return exclusiveEnd && exclusiveEnd > start ? addCalendarDays(exclusiveEnd, -1) : start;
+};
+
+export const getLocalCalendarDate = (timestamp: number) => {
+  const date = new Date(timestamp * 1000);
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+};
+
+export const getCalendarEventRouteId = (event: Pick<NostrEvent, 'id' | 'tags'>) =>
+  event.id || eventTagValue(event, 'd');
+
+export const getSharedConfigRevision = (response: unknown) => {
+  const record = asRecord(response);
+  const event = asRecord(record?.event);
+  return typeof event?.id === 'string' && event.id ? event.id : null;
+};
+
+export const isConfigRevisionConflict = (value: unknown) =>
+  asRecord(value)?.code === 'CONFIG_REVISION_CONFLICT';
 
 export const classifySharedWidgetConfig = (
   response: unknown
@@ -251,6 +295,19 @@ export const mergeCalendarEventsForRefs = (refs: unknown, ...groups: NostrEvent[
   ];
 };
 
+export const mergeCalendarEditorEvents = (
+  refs: unknown,
+  previous: NostrEvent[],
+  exact: NostrEvent[],
+  broad: NostrEvent[]
+) => {
+  const normalizedRefs = normalizeEventRefs(refs);
+  const retained = previous.filter((event) =>
+    normalizedRefs.some((ref) => matchesEventRef(event, ref))
+  );
+  return mergeCalendarEventsForRefs(normalizedRefs, retained, exact, broad);
+};
+
 export const canonicalizeEventRefs = (refs: unknown, values: NostrEvent[]) => {
   const events = collapseCalendarEventReplacements(values);
   const canonical: string[] = [];
@@ -274,7 +331,7 @@ export const canonicalizeEventRefs = (refs: unknown, values: NostrEvent[]) => {
   return Array.from(new Set(canonical));
 };
 
-const parseCalendarTimestamp = (value: string) => {
+export const parseCalendarTimestamp = (value: string) => {
   if (!value) return undefined;
   const numeric = Number(value);
   if (Number.isFinite(numeric)) return numeric > 1_000_000_000_000 ? numeric / 1000 : numeric;
@@ -283,10 +340,41 @@ const parseCalendarTimestamp = (value: string) => {
 };
 
 export const getCalendarEventEnd = (event: NostrEvent) => {
-  const end =
+  if (event.kind === EVENT_DATE) return undefined;
+  return (
     parseCalendarTimestamp(eventTagValue(event, 'end')) ||
-    parseCalendarTimestamp(eventTagValue(event, 'start'));
-  return event.kind === EVENT_DATE && end ? end + 86_399 : end;
+    parseCalendarTimestamp(eventTagValue(event, 'start'))
+  );
+};
+
+export const dateEventIsCurrent = (event: NostrEvent, now: number) => {
+  const inclusiveEnd = getDateEventInclusiveEnd(event);
+  return !inclusiveEnd || inclusiveEnd >= getLocalCalendarDate(now);
+};
+
+export const formatCalendarEventDate = (
+  event: NostrEvent,
+  locales?: Intl.LocalesArgument,
+  timeZone?: string
+) => {
+  const startRaw = eventTagValue(event, 'start');
+  if (event.kind === EVENT_DATE) {
+    const start = parseCalendarDate(startRaw);
+    if (!start) return 'Date not set';
+    const end = getDateEventInclusiveEnd(event);
+    return end && end !== start ? `${start} to ${end}` : start;
+  }
+
+  const start = parseCalendarTimestamp(startRaw);
+  const end = parseCalendarTimestamp(eventTagValue(event, 'end'));
+  if (start === undefined) return 'Date not set';
+  const formatter = new Intl.DateTimeFormat(locales, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+    ...(timeZone ? {timeZone} : {}),
+  });
+  const formattedStart = formatter.format(new Date(start * 1000));
+  return end ? `${formattedStart} - ${formatter.format(new Date(end * 1000))}` : formattedStart;
 };
 
 export const selectCalendarPickerEvents = (
@@ -299,6 +387,7 @@ export const selectCalendarPickerEvents = (
   const isSelected = (event: NostrEvent) => refs.some((ref) => matchesEventRef(event, ref));
   const selected = values.filter(isSelected);
   const available = collapseCalendarEventReplacements(values).filter((event) => {
+    if (event.kind === EVENT_DATE) return dateEventIsCurrent(event, now);
     const end = getCalendarEventEnd(event);
     return !end || end >= now;
   });

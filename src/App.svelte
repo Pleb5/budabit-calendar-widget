@@ -21,19 +21,25 @@
     createRequestState,
     eventTagValue,
     failRequest,
+    formatCalendarEventDate,
+    getCalendarEventRouteId,
     getEventConfigRef,
     getHostCapabilityCatalog,
     getHostCapabilityPolicy,
     hostCanAttempt,
     isBlockingRequestError,
+    isConfigRevisionConflict,
     isUnsupportedCapabilityError,
     matchesEventRef,
+    mergeCalendarEditorEvents,
     mergeCalendarEventsForRefs,
     normalizeEventRefs,
     normalizeWidgetConfig,
+    parseCalendarTimestamp,
     planEventQueries,
     requestEpochIsCurrent,
     resolveSharedWidgetConfig,
+    getSharedConfigRevision,
     retainRequestValue,
     selectCalendarPickerEvents,
     unavailableRequest,
@@ -49,6 +55,8 @@
   const NO_CONFIG_TEXT = 'No featured events have been configured for this community yet.';
   const SUMMARY_MAX_LENGTH = 200;
   const MAX_PICKER_EVENTS = 120;
+  const BROAD_PAGE_SIZE = 500;
+  const MAX_BROAD_PAGES = 3;
   const POST_INIT_REFRESH_DELAYS_MS = [1500, 3000, 5000, 8000, 12000] as const;
   const RESUME_REFRESH_DEBOUNCE_MS = 300;
   const BRIDGE_TIMEOUT_MS = 60_000;
@@ -99,6 +107,8 @@
   let capabilitiesRequest = $state<RequestState>(createRequestState());
   let savingConfig = $state(false);
   let editing = $state(false);
+  let configRevision = $state<string | null>(null);
+  let editingBaseRevision = $state<string | null>(null);
   let calendarCapabilities = $state<CommunityWriteCapability[]>([]);
   let hostCapabilityCatalog = $state<string[] | null>(null);
   let runtimeUnsupportedActions = $state<HostCapabilityAction[]>([]);
@@ -261,43 +271,11 @@
     selectedEventRefs = selectedEventRefs.filter((selectedRef) => selectedRef !== ref);
   }
 
-  const parseTimestamp = (value: string) => {
-    if (!value) return undefined;
-    const numeric = Number(value);
-    if (Number.isFinite(numeric)) return numeric > 1_000_000_000_000 ? numeric / 1000 : numeric;
-    const parsed = Date.parse(value.length === 10 ? `${value}T00:00:00` : value);
-
-    return Number.isNaN(parsed) ? undefined : Math.floor(parsed / 1000);
-  };
-
   function getEventStart(event: NostrEvent) {
-    return parseTimestamp(tagValue(event, 'start'));
+    return parseCalendarTimestamp(tagValue(event, 'start'));
   }
 
-  function formatDate(value?: number) {
-    if (!value) return '';
-
-    return new Intl.DateTimeFormat(undefined, {
-      dateStyle: 'medium',
-      ...(value % 86400 === 0 ? {} : {timeStyle: 'short'}),
-    }).format(new Date(value * 1000));
-  }
-
-  function formatEventDate(event: NostrEvent) {
-    const startRaw = tagValue(event, 'start');
-    const endRaw = tagValue(event, 'end');
-
-    if (event.kind === EVENT_DATE) {
-      if (!startRaw) return 'Date not set';
-      return endRaw && endRaw !== startRaw ? `${startRaw} to ${endRaw}` : startRaw;
-    }
-
-    const start = parseTimestamp(startRaw);
-    const end = parseTimestamp(endRaw);
-    if (!start) return 'Date not set';
-
-    return end ? `${formatDate(start)} - ${formatDate(end)}` : formatDate(start);
-  }
+  const formatEventDate = formatCalendarEventDate;
 
   const getEventTitle = (event: NostrEvent) =>
     tagValue(event, 'title') || tagValue(event, 'name') || 'Untitled event';
@@ -319,7 +297,7 @@
   const getVisibleEventSummary = (event: NostrEvent) =>
     truncateText(getEventSummary(event), SUMMARY_MAX_LENGTH);
 
-  const getEventRouteId = (event: NostrEvent) => tagValue(event, 'd') || event.id;
+  const getEventRouteId = getCalendarEventRouteId;
 
   const getAppOrigin = () =>
     typeof initPayload?.appOrigin === 'string' ? initPayload.appOrigin.replace(/\/+$/, '') : '';
@@ -431,9 +409,10 @@
       return;
     }
 
+    editingBaseRevision = configRevision;
     editing = true;
     void loadCalendarEvents(communityContext, {
-      refs: [],
+      refs: selectedEventRefs,
       broad: true,
       background: true,
     });
@@ -448,6 +427,12 @@
     headerInput = config.header;
     selectedEventRefs = [...config.eventRefs];
     editing = false;
+    editingBaseRevision = null;
+    void loadCalendarEvents(communityContext, {
+      refs: config.eventRefs,
+      broad: false,
+      background: true,
+    });
     await tick();
     scheduleHostResize();
   }
@@ -590,6 +575,7 @@
       markRuntimeUnsupported('community:querySharedConfig');
       pendingConfigRefresh = false;
       editing = false;
+      editingBaseRevision = null;
       applyFallbackConfiguration(ctx, true);
       return;
     }
@@ -630,6 +616,7 @@
   const applyFallbackConfiguration = (ctx: CommunityWidgetContext, unavailable = false) => {
     const fallback = getFallbackConfig();
     applyConfig(fallback.config, editing);
+    configRevision = null;
     status = fallback.status;
     configRequest = unavailable
       ? unavailableRequest(
@@ -700,6 +687,7 @@
       }
 
       const fallback = getFallbackConfig();
+      configRevision = getSharedConfigRevision(res);
       const sharedConfig = resolveSharedWidgetConfig(
         res,
         fallback.config,
@@ -831,6 +819,7 @@
     if (eventsRetryTimer) clearTimeout(eventsRetryTimer);
     eventsRetryTimer = undefined;
     currentEventsLoadKey = loadKey;
+    const previousEvents = events;
 
     if (!refs.length && !broad) {
       events = [];
@@ -845,34 +834,71 @@
     }
 
     const requestBridge = bridge;
-    const queryEvents = async (exactRefs?: string[]) => {
+    const queryEvents = async (exactRefs?: string[], until?: number) => {
       const res = await requestBridge.request('community:queryEvents', {
         descriptors: CALENDAR_DESCRIPTORS,
-        limit: 500,
+        limit: BROAD_PAGE_SIZE,
         ...(exactRefs?.length ? {refs: exactRefs} : {}),
+        ...(until ? {until} : {}),
       });
       if (!contextIsCurrent(expectedContext, generation) || runId !== eventsRunId) return null;
       if ('error' in res) throw res;
       if (!responseMatchesContext(res, expectedContext)) throw staleResponseError;
-      return filterCalendarEvents(res.events);
+      const rawEvents = Array.isArray(res.events) ? res.events : [];
+      const paged = res as typeof res & {hasMore?: boolean; nextUntil?: number};
+      return {
+        events: filterCalendarEvents(rawEvents),
+        rawCount: rawEvents.length,
+        oldestCreatedAt: rawEvents.reduce(
+          (oldest, event) => Math.min(oldest, event.created_at),
+          Number.POSITIVE_INFINITY
+        ),
+        hasPaginationMetadata: typeof paged.hasMore === 'boolean',
+        hasMore: paged.hasMore,
+        nextUntil: paged.nextUntil,
+      };
     };
 
     try {
       const initialPlan = planEventQueries(refs);
-      const exactEvents = initialPlan.canonicalRefs.length
+      const exactPage = initialPlan.canonicalRefs.length
         ? await queryEvents(initialPlan.canonicalRefs)
-        : [];
-      if (exactEvents === null) return;
+        : null;
+      if (initialPlan.canonicalRefs.length && exactPage === null) return;
+      const exactEvents = exactPage?.events ?? [];
 
       if (exactEvents.length) {
         events = mergeCalendarEventsForRefs(refs, events, exactEvents);
         eventsRequest = retainRequestValue(eventsRequest);
       }
       const resolvedPlan = planEventQueries(refs, exactEvents);
-      const broadEvents = broad || resolvedPlan.needsBroadDiscovery ? await queryEvents() : [];
-      if (broadEvents === null) return;
+      const broadEvents: NostrEvent[] = [];
+      if (broad || resolvedPlan.needsBroadDiscovery) {
+        let until: number | undefined;
+        for (let pageNumber = 0; pageNumber < MAX_BROAD_PAGES; pageNumber += 1) {
+          const page = await queryEvents(undefined, until);
+          if (page === null) return;
+          broadEvents.push(...page.events);
 
-      events = mergeCalendarEventsForRefs(refs, exactEvents, broadEvents);
+          const hasMore = page.hasPaginationMetadata
+            ? page.hasMore === true
+            : page.rawCount >= BROAD_PAGE_SIZE;
+          if (!hasMore) break;
+
+          const nextUntil =
+            page.nextUntil ??
+            (!page.hasPaginationMetadata && Number.isFinite(page.oldestCreatedAt)
+              ? page.oldestCreatedAt - 1
+              : undefined);
+          if (!nextUntil || nextUntil <= 0 || (until !== undefined && nextUntil >= until)) break;
+          until = nextUntil;
+        }
+      }
+
+      events =
+        broad || resolvedPlan.needsBroadDiscovery
+          ? mergeCalendarEditorEvents(refs, previousEvents, exactEvents, broadEvents)
+          : mergeCalendarEventsForRefs(refs, exactEvents);
       eventsRequest = completeRequest(eventsRequest);
       status = events.length ? '' : 'No events found.';
     } catch (err) {
@@ -909,12 +935,20 @@
   const handleUnsupportedConfigPublish = () => {
     markRuntimeUnsupported('community:publishSharedConfig');
     editing = false;
+    editingBaseRevision = null;
     error = '';
     status = 'Shared configuration editing is unavailable on this host.';
   };
 
   async function saveConfig() {
     if (!communityContext || !canConfigure) return;
+
+    if (configRevision !== editingBaseRevision) {
+      error =
+        'Featured events changed while you were editing. Review the refreshed configuration before saving.';
+      status = 'Unable to save because the shared configuration was refreshed.';
+      return;
+    }
 
     const expectedContext = communityContext;
     const generation = contextGeneration;
@@ -936,11 +970,20 @@
         key: CONFIG_KEY,
         descriptors: CALENDAR_DESCRIPTORS,
         config: next,
+        ...({expectedRevision: editingBaseRevision} as Record<string, unknown>),
       });
 
       if (!contextIsCurrent(expectedContext, generation)) return;
 
       if (!res || 'error' in res) {
+        if (res && isConfigRevisionConflict(res)) {
+          error =
+            'Featured events changed while you were editing. Refresh or cancel before saving again.';
+          status = 'Unable to save because another moderator updated the configuration.';
+          pendingConfigRefresh = false;
+          queueMicrotask(() => void loadSharedConfig(expectedContext, {background: true}));
+          return;
+        }
         if (res && isUnsupportedCapabilityError(res)) {
           handleUnsupportedConfigPublish();
           return;
@@ -958,6 +1001,8 @@
 
       invalidateConfigQueries();
       applyConfig(next);
+      configRevision = typeof res.eventId === 'string' ? res.eventId : configRevision;
+      editingBaseRevision = null;
       configRequest = completeRequest(configRequest);
       editing = false;
       status = 'Featured events saved for this community.';
@@ -999,7 +1044,7 @@
       void loadSharedConfig(ctx, {background: true});
     } else if (configRequest.hasValue) {
       void loadCalendarEvents(ctx, {
-        refs: editing ? [] : config.eventRefs,
+        refs: editing ? selectedEventRefs : config.eventRefs,
         broad: editing,
         background: true,
       });
@@ -1034,7 +1079,7 @@
     if (configRequest.phase === 'error') void loadSharedConfig(ctx);
     if (eventsRequest.phase === 'error') {
       void loadCalendarEvents(ctx, {
-        refs: editing ? [] : config.eventRefs,
+        refs: editing ? selectedEventRefs : config.eventRefs,
         broad: editing,
       });
     }
@@ -1094,6 +1139,8 @@
     currentEventsLoadKey = '';
     savingConfig = false;
     editing = false;
+    configRevision = null;
+    editingBaseRevision = null;
     lastRequestedHeight = 0;
 
     applyConfig({header: DEFAULT_HEADER, eventRefs: []});
@@ -1314,7 +1361,7 @@
     {:else}
       <section class="panel muted">
         <div class="event-heading">
-          <strong>{DEFAULT_HEADER}</strong>
+          <strong>{config.header || DEFAULT_HEADER}</strong>
           {#if canConfigure}
             <button type="button" class="secondary small" onclick={startEditing}>Configure</button>
           {/if}
@@ -1347,7 +1394,8 @@
           </div>
           <button
             type="button"
-            onclick={() => loadCalendarEvents(communityContext, {refs: [], broad: true})}
+            onclick={() =>
+              loadCalendarEvents(communityContext, {refs: selectedEventRefs, broad: true})}
             disabled={loadingEvents}
           >
             {loadingEvents ? 'Loading...' : 'Refresh'}

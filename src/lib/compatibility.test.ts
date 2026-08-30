@@ -2,6 +2,7 @@ import {describe, expect, it} from 'vitest';
 import type {NostrEvent} from 'budabit-sdk';
 import {
   DEFAULT_HEADER,
+  EVENT_DATE,
   EVENT_TIME,
   advanceRequestEpoch,
   beginRequest,
@@ -12,13 +13,18 @@ import {
   collapseCalendarEventReplacements,
   createRequestState,
   failRequest,
+  formatCalendarEventDate,
+  getCalendarEventRouteId,
+  getDateEventInclusiveEnd,
   getHostCapabilityCatalog,
   getHostCapabilityPolicy,
   getRetryDelay,
   isBlockingRequestError,
+  isConfigRevisionConflict,
   isUnsupportedCapabilityError,
   matchesEventRef,
   mergeCalendarEvents,
+  mergeCalendarEditorEvents,
   mergeCalendarEventsForRefs,
   normalizeWidgetConfig,
   planEventQueries,
@@ -26,6 +32,7 @@ import {
   resolveSharedWidgetConfig,
   retainRequestValue,
   selectCalendarPickerEvents,
+  getSharedConfigRevision,
 } from './compatibility';
 
 const author = 'a'.repeat(64);
@@ -120,6 +127,18 @@ describe('calendar replacement collapse', () => {
     ).toBe(true);
   });
 
+  it('retains selected events when broad editor discovery omits them', () => {
+    const selected = event({id: '4'.repeat(64), tags: [['d', 'selected']]});
+    const discovered = event({id: '3'.repeat(64), tags: [['d', 'discovered']]});
+
+    expect(
+      mergeCalendarEditorEvents([selected.id], [selected], [], [discovered]).map(({id}) => id)
+    ).toEqual([selected.id, discovered.id]);
+    expect(
+      mergeCalendarEditorEvents(['selected'], [selected], [], [discovered]).map(({id}) => id)
+    ).toContain(selected.id);
+  });
+
   it('bounds picker candidates, drops completed events, and retains selected history', () => {
     const completed = event({
       id: '4'.repeat(64),
@@ -146,6 +165,61 @@ describe('calendar replacement collapse', () => {
         2
       ).map(({id}) => id)
     ).toEqual([selectedCompleted.id, upcoming.id]);
+  });
+});
+
+describe('calendar semantics', () => {
+  it('treats date-event ends as exclusive calendar dates', () => {
+    const dateEvent = event({
+      kind: EVENT_DATE,
+      tags: [['d', 'conference'], ['start', '2026-03-07'], ['end', '2026-03-10']],
+    });
+
+    expect(getDateEventInclusiveEnd(dateEvent)).toBe('2026-03-09');
+    expect(formatCalendarEventDate(dateEvent)).toBe('2026-03-07 to 2026-03-09');
+
+    const oneDay = event({
+      kind: EVENT_DATE,
+      tags: [['d', 'one-day'], ['start', '2026-03-07']],
+    });
+    expect(getDateEventInclusiveEnd(oneDay)).toBe('2026-03-07');
+    expect(formatCalendarEventDate(oneDay)).toBe('2026-03-07');
+  });
+
+  it('uses calendar dates across DST when filtering date events', () => {
+    const dateEvent = event({
+      kind: EVENT_DATE,
+      tags: [['d', 'dst'], ['start', '2026-03-08'], ['end', '2026-03-09']],
+    });
+    const noonOnStart = Math.floor(new Date(2026, 2, 8, 12).getTime() / 1000);
+    const noonAfterEnd = Math.floor(new Date(2026, 2, 9, 12).getTime() / 1000);
+
+    expect(selectCalendarPickerEvents([dateEvent], [], noonOnStart, 10)).toEqual([dateEvent]);
+    expect(selectCalendarPickerEvents([dateEvent], [], noonAfterEnd, 10)).toEqual([]);
+  });
+
+  it('always displays local time for timed events at UTC midnight', () => {
+    const midnight = event({
+      tags: [['d', 'midnight'], ['start', '1780272000']],
+    });
+
+    expect(formatCalendarEventDate(midnight, 'en-US', 'UTC')).toMatch(/12:00 AM/);
+    expect(formatCalendarEventDate(midnight, 'en-US', 'America/New_York')).toMatch(/8:00 PM/);
+  });
+
+  it('routes by exact ID and extracts config revisions', () => {
+    const value = event({id: '2'.repeat(64), tags: [['d', 'duplicate']]});
+    const duplicate = event({
+      id: '3'.repeat(64),
+      pubkey: 'b'.repeat(64),
+      tags: [['d', 'duplicate']],
+    });
+    expect(getCalendarEventRouteId(value)).toBe(value.id);
+    expect(getCalendarEventRouteId(duplicate)).toBe(duplicate.id);
+    expect(getCalendarEventRouteId(value)).not.toBe(getCalendarEventRouteId(duplicate));
+    expect(getSharedConfigRevision({event: value})).toBe(value.id);
+    expect(getSharedConfigRevision({status: 'ok'})).toBeNull();
+    expect(isConfigRevisionConflict({code: 'CONFIG_REVISION_CONFLICT'})).toBe(true);
   });
 });
 

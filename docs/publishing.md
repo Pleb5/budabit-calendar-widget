@@ -16,6 +16,8 @@ Configuration is intentionally based on generic community context:
 - Do not hard-code community section names. The host maps descriptors to active community sections before checking grants or querying.
 - Refetch capabilities/events on `community:contextChanged` and ignore stale responses whose `contextSessionId` / `contextVersion` no longer match the current context.
 - Keep the widget fetch-based. Canonical event IDs/addresses are queried exactly, followed by broad descriptor discovery for unresolved or legacy bare `d` refs.
+- Keep broad discovery bounded and preserve exact configured events while paging publication history.
+- Publish shared configuration with the revision observed when editing began so compatible hosts can reject stale moderator drafts.
 - Treat catalog-declared or runtime `UNSUPPORTED_CAPABILITY` shared-config support as read-only URL/local fallback mode.
 - Treat the before/after manifest scripts as alternative placements of one widget identifier, not simultaneously installable variants.
 

@@ -6,9 +6,9 @@ Inline BudaBit Smart Widget for featuring one or more already-published communit
 
 - Renders in `community-home-before-quicklinks` or `community-home-after-quicklinks`.
 - Reads generic `communityContext` from BudaBit.
-- Queries events with `community:queryEvents` for descriptors `{kind: 31923}` and `{kind: 31922}`. Canonical IDs/addresses are fetched exactly first; unresolved and legacy `d` refs fall back to broad descriptor discovery.
+- Queries events with `community:queryEvents` for descriptors `{kind: 31923}` and `{kind: 31922}`. Canonical IDs/addresses are fetched exactly first; broad discovery uses bounded pagination and retains configured events.
 - Loads the current community-wide featured events with `community:querySharedConfig`.
-- Saves community-wide featured events config with `community:publishSharedConfig`; latest valid moderator-authored config wins.
+- Saves community-wide featured events config with `community:publishSharedConfig` and rejects drafts based on a superseded config revision when supported by the host.
 - Derives event publishing access and section moderator access separately with `community:checkWriteCapabilities` for those descriptors.
 - Reacts to `community:contextChanged` and ignores stale responses whose context version no longer matches.
 - Retries transient community readiness/timeouts with bounded backoff and refreshes after initialization or browser resume/network events without clearing the last successful view.
