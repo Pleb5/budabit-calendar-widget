@@ -26,6 +26,7 @@
     getEventConfigRef,
     getHostCapabilityCatalog,
     getHostCapabilityPolicy,
+    getLocalCalendarDate,
     hostCanAttempt,
     isBlockingRequestError,
     isConfigRevisionConflict,
@@ -834,12 +835,19 @@
     }
 
     const requestBridge = bridge;
+    const discoveryNow = Math.floor(Date.now() / 1000);
     const queryEvents = async (exactRefs?: string[], until?: number) => {
       const res = await requestBridge.request('community:queryEvents', {
         descriptors: CALENDAR_DESCRIPTORS,
         limit: BROAD_PAGE_SIZE,
         ...(exactRefs?.length ? {refs: exactRefs} : {}),
         ...(until ? {until} : {}),
+        ...(!exactRefs?.length
+          ? ({
+              calendarStart: discoveryNow,
+              calendarDate: getLocalCalendarDate(discoveryNow),
+            } as Record<string, unknown>)
+          : {}),
       });
       if (!contextIsCurrent(expectedContext, generation) || runId !== eventsRunId) return null;
       if ('error' in res) throw res;
