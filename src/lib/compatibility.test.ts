@@ -28,6 +28,7 @@ import {
   mergeCalendarEventsForRefs,
   normalizeWidgetConfig,
   planEventQueries,
+  parseEventRefResolutions,
   requestEpochIsCurrent,
   resolveSharedWidgetConfig,
   retainRequestValue,
@@ -83,6 +84,21 @@ describe('featured event refs', () => {
       `${EVENT_TIME}:${author}:community-call`,
       `${EVENT_TIME}:${'b'.repeat(64)}:community-call`,
     ]);
+  });
+
+  it('stops canonical discovery only for explicit terminal host evidence', () => {
+    const address = `${EVENT_TIME}:${author}:community-call`;
+    for (const status of ['deleted', 'missing'] as const) {
+      expect(planEventQueries([address], [], [{ref: address, status}]).needsBroadDiscovery).toBe(false);
+      expect(planEventQueries([address, 'legacy'], [], [{ref: address, status}]).needsBroadDiscovery).toBe(true);
+    }
+    expect(planEventQueries([address], [], [{ref: address, status: 'unavailable'}]).needsBroadDiscovery).toBe(true);
+    expect(planEventQueries([address], [], [{ref: 'other', status: 'deleted'}]).needsBroadDiscovery).toBe(true);
+  });
+
+  it('ignores malformed, unrelated and legacy-host resolution metadata', () => {
+    expect(parseEventRefResolutions(undefined, ['pin'])).toEqual([]);
+    expect(parseEventRefResolutions([null, {}, {ref: 'other', status: 'deleted'}, {ref: 'pin', status: 'unknown'}, {ref: 'pin', status: 'missing'}], ['pin'])).toEqual([{ref: 'pin', status: 'missing'}]);
   });
 });
 

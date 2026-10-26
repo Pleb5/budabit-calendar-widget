@@ -15,7 +15,8 @@ Configuration is intentionally based on generic community context:
 - Do not expect a host-provided `canCreateCalendarEvents` boolean.
 - Do not hard-code community section names. The host maps descriptors to active community sections before checking grants or querying.
 - Refetch capabilities/events on `community:contextChanged` and ignore stale responses whose `contextSessionId` / `contextVersion` no longer match the current context.
-- Keep the widget fetch-based. Canonical event IDs/addresses are queried exactly, followed by broad descriptor discovery for unresolved or legacy bare `d` refs.
+- Keep the widget fetch-based. Canonical event IDs/addresses are queried exactly. Optional host `resolutions` metadata with `deleted` or `missing` is terminal for that request and skips broad discovery. Older hosts without that metadata and legacy bare `d` refs retain bounded broad discovery.
+- Confirmed deleted selections display an author-deletion message; mixed results keep available cards and show an unavailable count. Explicit past pins remain visible. No configuration is rewritten. Identical all-terminal startup refreshes coalesce for 30 seconds; later refreshes may discover a newer replacement.
 - Keep broad discovery bounded and preserve exact configured events while paging publication history.
 - Publish shared configuration with the revision observed when editing began so compatible hosts can reject stale moderator drafts.
 - Treat catalog-declared or runtime `UNSUPPORTED_CAPABILITY` shared-config support as read-only URL/local fallback mode.

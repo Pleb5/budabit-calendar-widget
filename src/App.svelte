@@ -37,6 +37,7 @@
     normalizeEventRefs,
     normalizeWidgetConfig,
     parseCalendarTimestamp,
+    parseEventRefResolutions,
     planEventQueries,
     requestEpochIsCurrent,
     resolveSharedWidgetConfig,
@@ -745,6 +746,9 @@
     }
   }
 
+  let terminalEventRefs = $state<string[]>([]);
+  let deletedEventCount = $state(0);
+  let terminalEventsLoadedAt = 0;
   const getEventsLoadKey = (refs: string[], broad: boolean) => JSON.stringify([broad, refs]);
 
   const handleEventsFailure = (
@@ -804,6 +808,14 @@
     const refs = normalizeEventRefs(options.refs ?? config.eventRefs);
     const broad = options.broad === true;
     const loadKey = getEventsLoadKey(refs, broad);
+    // Coalesce startup/config refreshes after authoritative absence. Expire this
+    // short-lived result so a later replacement or relay recovery can be found.
+    if (
+      options.background && !broad && eventsRequest.phase === 'success' &&
+      loadKey === currentEventsLoadKey && refs.length > 0 &&
+      refs.every((ref) => terminalEventRefs.includes(ref)) &&
+      Date.now() - terminalEventsLoadedAt < 30_000
+    ) return;
     const retryingRun = options.runId !== undefined;
     if (isRequestBusy(eventsRequest) && !retryingRun) {
       if (loadKey !== currentEventsLoadKey) {
@@ -821,6 +833,8 @@
     eventsRetryTimer = undefined;
     currentEventsLoadKey = loadKey;
     const previousEvents = events;
+    terminalEventRefs = [];
+    deletedEventCount = 0;
 
     if (!refs.length && !broad) {
       events = [];
@@ -854,7 +868,14 @@
       if (!responseMatchesContext(res, expectedContext)) throw staleResponseError;
       const rawEvents = Array.isArray(res.events) ? res.events : [];
       const paged = res as typeof res & {hasMore?: boolean; nextUntil?: number};
+      const resolutions = parseEventRefResolutions(
+        (res as {resolutions?: unknown}).resolutions, exactRefs ?? []
+      );
+      if (resolutions.some((item) => item.status === 'unavailable')) {
+        throw {error: 'Community query timed out', code: 'COMMUNITY_QUERY_TIMEOUT'};
+      }
       return {
+        resolutions,
         events: filterCalendarEvents(rawEvents),
         rawCount: rawEvents.length,
         oldestCreatedAt: rawEvents.reduce(
@@ -879,7 +900,12 @@
         events = mergeCalendarEventsForRefs(refs, events, exactEvents);
         eventsRequest = retainRequestValue(eventsRequest);
       }
-      const resolvedPlan = planEventQueries(refs, exactEvents);
+      const resolutions = exactPage?.resolutions ?? [];
+      terminalEventRefs = resolutions
+        .filter((item) => item.status === 'deleted' || item.status === 'missing')
+        .map((item) => item.ref);
+      deletedEventCount = resolutions.filter((item) => item.status === 'deleted').length;
+      const resolvedPlan = planEventQueries(refs, exactEvents, resolutions);
       const broadEvents: NostrEvent[] = [];
       if (broad || resolvedPlan.needsBroadDiscovery) {
         let until: number | undefined;
@@ -907,7 +933,9 @@
         broad || resolvedPlan.needsBroadDiscovery
           ? mergeCalendarEditorEvents(refs, previousEvents, exactEvents, broadEvents)
           : mergeCalendarEventsForRefs(refs, exactEvents);
+      events = events.filter((event) => !terminalEventRefs.some((ref) => matchesEventRef(event, ref)));
       eventsRequest = completeRequest(eventsRequest);
+      terminalEventsLoadedAt = Date.now();
       status = events.length ? '' : 'No events found.';
     } catch (err) {
       if (contextIsCurrent(expectedContext, generation) && runId === eventsRunId) {
@@ -1135,6 +1163,8 @@
     communityContext = nextContext;
     calendarCapabilities = [];
     events = [];
+    terminalEventRefs = [];
+    deletedEventCount = 0;
     error = '';
     configRequest = createRequestState();
     eventsRequest = createRequestState();
@@ -1364,7 +1394,7 @@
             <button type="button" class="secondary small" onclick={startEditing}>Edit</button>
           {/if}
         </div>
-        <p>The configured events could not be found in this community.</p>
+        <p>{deletedEventCount === config.eventRefs.length ? 'The configured events were deleted by their authors.' : 'The configured events could not be found in this community.'}</p>
       </section>
     {:else}
       <section class="panel muted">
@@ -1376,6 +1406,10 @@
         </div>
         <p>{NO_CONFIG_TEXT}</p>
       </section>
+    {/if}
+
+    {#if selectedEvents.length && terminalEventRefs.length}
+      <p role="status">{terminalEventRefs.length} configured {terminalEventRefs.length === 1 ? 'event is' : 'events are'} no longer available.</p>
     {/if}
 
     {#if hasRequestError && !blockingLoadError}

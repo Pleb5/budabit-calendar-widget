@@ -216,7 +216,21 @@ export const matchesEventRef = (event: NostrEvent, value: unknown) => {
   return eventTagValue(event, 'd') === ref.value;
 };
 
-export const planEventQueries = (refs: unknown, exactEvents: NostrEvent[] = []) => {
+export type EventRefResolution = {ref: string; status: 'found' | 'deleted' | 'missing' | 'unavailable'};
+
+export const parseEventRefResolutions = (value: unknown, refs: string[]): EventRefResolution[] => {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is EventRefResolution =>
+    typeof item?.ref === 'string' && refs.includes(item.ref) &&
+    ['found', 'deleted', 'missing', 'unavailable'].includes(item.status)
+  );
+};
+
+export const planEventQueries = (
+  refs: unknown,
+  exactEvents: NostrEvent[] = [],
+  resolutions: EventRefResolution[] = []
+) => {
   const normalizedRefs = normalizeEventRefs(refs);
   const classified = normalizedRefs
     .map(classifyEventRef)
@@ -235,7 +249,11 @@ export const planEventQueries = (refs: unknown, exactEvents: NostrEvent[] = []) 
     legacyRefs,
     unresolvedCanonicalRefs,
     needsBroadDiscovery:
-      normalizedRefs.length === 0 || legacyRefs.length > 0 || unresolvedCanonicalRefs.length > 0,
+      normalizedRefs.length === 0 || legacyRefs.length > 0 || unresolvedCanonicalRefs.some((ref) =>
+        !resolutions.some((item) =>
+          item.ref === ref && (item.status === 'deleted' || item.status === 'missing')
+        )
+      ),
   };
 };
 
