@@ -1,12 +1,14 @@
 {
   "name": "budabit-calendar-widget",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "private": true,
   "description": "BudaBit inline widget for featuring community calendar events",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
+    "manifest:release:after": "pnpm manifest:after --version 0.2.15 --changelog 'Handle deleted featured events without broad fallback and preserve available pins'",
+    "manifest:release:before": "pnpm manifest:before --version 0.2.15 --changelog 'Handle deleted featured events without broad fallback and preserve available pins'",
     "test": "vitest run",
     "typecheck": "svelte-check --tsconfig ./tsconfig.json",
     "check": "pnpm typecheck && pnpm test && pnpm build",

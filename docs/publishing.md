@@ -1,5 +1,11 @@
 # Publishing Notes
 
+For release 0.2.15, use `manifest:release:after` or
+`manifest:release:before` with the uploaded `WIDGET_APP_URL`. Serve the HTML
+from an iframe-compatible host: `Content-Disposition: attachment` prevents
+the artifact from running inside BudaBit. Deploy the paired host resolution
+changes before checking terminal deleted/missing selections.
+
 The widget is designed for BudaBit's community widget publisher.
 
 - Default header: `Featured events`
