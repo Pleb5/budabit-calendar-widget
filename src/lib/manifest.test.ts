@@ -12,9 +12,9 @@ describe('widget manifest scripts', () => {
 
   it.each([after, before])('declares the featured calendar shared-config scope', (script) => {
     expect(script).toContain("--shared-config 'budabit-calendar-widget=featured-calendar-event'");
-    expect(script).toContain("--version '0.2.14'");
+    expect(script).toContain('--version $npm_package_version');
     expect(script).toContain(
-      "--changelog 'Fix calendar discovery, dates, navigation, and edit conflicts'"
+      "--changelog 'Render event Markdown and images, wrap long content, and resize reliably after image loading'"
     );
   });
 
@@ -77,7 +77,7 @@ describe('widget manifest scripts', () => {
         'featured-calendar-event',
       ]);
       expect(event.tags).toContainEqual(['d', 'featured-calendar-event']);
-      expect(event.tags).toContainEqual(['version', '0.2.14']);
+      expect(event.tags).toContainEqual(['version', packageJson.version]);
     } finally {
       rmSync(output, {recursive: true, force: true});
     }

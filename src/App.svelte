@@ -50,12 +50,13 @@
     type WidgetConfig,
   } from './lib/compatibility';
   import {createBoundedPoll} from './lib/boundedPoll';
+  import EventDescription from './EventDescription.svelte';
+  import {createHostResizer} from './lib/host-resize';
 
   const CALENDAR_DESCRIPTORS: CommunityEventDescriptor[] = [{kind: EVENT_TIME}, {kind: EVENT_DATE}];
   const CONFIG_NAMESPACE = 'budabit-calendar-widget';
   const CONFIG_KEY = 'featured-calendar-event';
   const NO_CONFIG_TEXT = 'No featured events have been configured for this community yet.';
-  const SUMMARY_MAX_LENGTH = 200;
   const MAX_PICKER_EVENTS = 120;
   const BROAD_PAGE_SIZE = 500;
   const MAX_BROAD_PAGES = 3;
@@ -117,8 +118,6 @@
   let widgetTheme = $state<WidgetTheme>('light');
   let mainElement = $state<HTMLElement | null>(null);
   let configPanelElement = $state<HTMLElement | null>(null);
-  let resizeFrame: number | undefined;
-  let lastRequestedHeight = 0;
   let contextGeneration = 0;
   let configRunId = 0;
   let eventsRunId = 0;
@@ -293,12 +292,6 @@
     )
   );
 
-  const truncateText = (value: string, maxLength: number) =>
-    value.length > maxLength ? `${value.slice(0, maxLength).trimEnd()}...` : value;
-
-  const getVisibleEventSummary = (event: NostrEvent) =>
-    truncateText(getEventSummary(event), SUMMARY_MAX_LENGTH);
-
   const getEventRouteId = getCalendarEventRouteId;
 
   const getAppOrigin = () =>
@@ -374,36 +367,19 @@
   };
 
   const getContentHeight = () => {
-    if (!mainElement) return 1;
+    if (!bridge || !initPayload || !mainElement) return undefined;
+    if (mainElement.getBoundingClientRect().width <= 0) return undefined;
 
     return Math.ceil(
       Math.max(mainElement.scrollHeight, mainElement.getBoundingClientRect().height, 1) + 2
     );
   };
 
-  const requestHostResize = () => {
-    if (!bridge) return;
-
-    const height = getContentHeight();
-    if (!Number.isFinite(height) || height <= 0 || Math.abs(height - lastRequestedHeight) < 2)
-      return;
-
-    lastRequestedHeight = height;
-    void bridge.request('ui:resize', {height}).catch(() => {
-      // Older hosts may ignore resize; the widget still works with iframe scrolling.
-    });
-  };
-
-  const scheduleHostResize = () => {
-    if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame);
-
-    resizeFrame = requestAnimationFrame(() => {
-      resizeFrame = requestAnimationFrame(() => {
-        resizeFrame = undefined;
-        requestHostResize();
-      });
-    });
-  };
+  const hostResizer = createHostResizer({
+    measure: getContentHeight,
+    request: async (height) => bridge?.request('ui:resize', {height}),
+  });
+  const scheduleHostResize = hostResizer.schedule;
 
   async function startEditing() {
     if (editing) {
@@ -1179,7 +1155,7 @@
     editing = false;
     configRevision = null;
     editingBaseRevision = null;
-    lastRequestedHeight = 0;
+    hostResizer.reset();
 
     applyConfig({header: DEFAULT_HEADER, eventRefs: []});
     status = nextContext
@@ -1193,18 +1169,22 @@
     const element = mainElement;
     if (!bridge || !element) return;
 
-    lastRequestedHeight = 0;
-    scheduleHostResize();
+    hostResizer.reset();
 
-    if (typeof ResizeObserver === 'undefined') return;
-
-    const observer = new ResizeObserver(scheduleHostResize);
-    observer.observe(element);
+    const observer = typeof ResizeObserver === 'undefined'
+      ? undefined
+      : new ResizeObserver(scheduleHostResize);
+    observer?.observe(element);
+    window.addEventListener('resize', scheduleHostResize);
+    element.addEventListener('load', scheduleHostResize, true);
+    element.addEventListener('error', scheduleHostResize, true);
 
     return () => {
-      observer.disconnect();
-      if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame);
-      resizeFrame = undefined;
+      observer?.disconnect();
+      window.removeEventListener('resize', scheduleHostResize);
+      element.removeEventListener('load', scheduleHostResize, true);
+      element.removeEventListener('error', scheduleHostResize, true);
+      hostResizer.cancel();
     };
   });
 
@@ -1341,34 +1321,27 @@
           {#each selectedEvents as featuredEvent (featuredEvent.id)}
             {@const eventPath = getEventPath(featuredEvent)}
             {@const eventHref = getEventHref(featuredEvent)}
-            {#if eventHref}
-              <a
-                class="event-card event-card-link"
-                href={eventHref}
-                target="_top"
-                onclick={(event) => navigateToEvent(event, eventPath, eventHref)}
-              >
-                <h1>{getEventTitle(featuredEvent)}</h1>
-                <p class="date">{formatEventDate(featuredEvent)}</p>
-                {#if tagValue(featuredEvent, 'location')}
-                  <p class="location">{tagValue(featuredEvent, 'location')}</p>
+            <article class="event-card">
+              <h1>
+                {#if eventHref}
+                  <a
+                    class="event-card-link"
+                    href={eventHref}
+                    target="_top"
+                    onclick={(event) => navigateToEvent(event, eventPath, eventHref)}
+                  >{getEventTitle(featuredEvent)}</a>
+                {:else}
+                  {getEventTitle(featuredEvent)}
                 {/if}
-                {#if getEventSummary(featuredEvent)}
-                  <p class="summary">{getVisibleEventSummary(featuredEvent)}</p>
-                {/if}
-              </a>
-            {:else}
-              <article class="event-card">
-                <h1>{getEventTitle(featuredEvent)}</h1>
-                <p class="date">{formatEventDate(featuredEvent)}</p>
-                {#if tagValue(featuredEvent, 'location')}
-                  <p class="location">{tagValue(featuredEvent, 'location')}</p>
-                {/if}
-                {#if getEventSummary(featuredEvent)}
-                  <p class="summary">{getVisibleEventSummary(featuredEvent)}</p>
-                {/if}
-              </article>
-            {/if}
+              </h1>
+              <p class="date">{formatEventDate(featuredEvent)}</p>
+              {#if tagValue(featuredEvent, 'location')}
+                <p class="location">{tagValue(featuredEvent, 'location')}</p>
+              {/if}
+              {#if getEventSummary(featuredEvent)}
+                <EventDescription content={getEventSummary(featuredEvent)} />
+              {/if}
+            </article>
           {/each}
         </div>
       </section>
@@ -1644,6 +1617,8 @@
   main {
     box-sizing: border-box;
     width: 100%;
+    min-width: 0;
+    overflow-wrap: anywhere;
     padding: 0;
   }
 
@@ -1658,22 +1633,27 @@
   }
 
   .event-card {
+    min-width: 0;
     padding: 20px;
   }
 
   .featured-events {
     display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr);
     gap: 8px;
   }
 
   .event-list {
     display: grid;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr);
     gap: 12px;
   }
 
   .event-heading {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) minmax(0, auto) minmax(0, 1fr);
     align-items: center;
     gap: 12px;
   }
@@ -1708,8 +1688,8 @@
     cursor: pointer;
   }
 
-  .event-card-link:hover h1,
-  .event-card-link:focus-visible h1 {
+  .event-card-link:hover,
+  .event-card-link:focus-visible {
     color: var(--accent-strong);
     text-decoration: underline;
     text-underline-offset: 0.14em;
@@ -1730,13 +1710,6 @@
   .location {
     color: var(--text-muted);
     font-weight: 600;
-  }
-
-  .summary {
-    margin: 14px 0 0;
-    color: var(--text-muted);
-    line-height: 1.45;
-    white-space: pre-wrap;
   }
 
   .panel {
