@@ -7,15 +7,15 @@ import {describe, expect, it} from 'vitest';
 import packageJson from '../../package.json';
 
 describe('widget manifest scripts', () => {
-  const after = packageJson.scripts['manifest:after'];
-  const before = packageJson.scripts['manifest:before'];
+  const script = readFileSync(new URL('../../scripts/manifest.mjs', import.meta.url), 'utf8');
+  const after = script;
+  const before = script;
 
   it.each([after, before])('declares the featured calendar shared-config scope', (script) => {
-    expect(script).toContain("--shared-config 'budabit-calendar-widget=featured-calendar-event'");
-    expect(script).toContain('--version $npm_package_version');
-    expect(script).toContain(
-      "--changelog 'Render event Markdown and images, wrap long content, and resize reliably after image loading'"
-    );
+    expect(script).toContain("'budabit-calendar-widget=featured-calendar-event'");
+    expect(script).toContain("'--version', version");
+    expect(script).toContain("'profiles:resolve'");
+    expect(script).toContain("'ui:openProfile'");
   });
 
   it('requires tagged community relays for every publish command', () => {
@@ -29,21 +29,22 @@ describe('widget manifest scripts', () => {
   });
 
   it('keeps both placement alternatives on the existing widget identifier', () => {
-    expect(after).toContain("--identifier 'featured-calendar-event'");
-    expect(before).toContain("--identifier 'featured-calendar-event'");
-    expect(after).toContain("--slot-type 'community-home-after-quicklinks'");
-    expect(before).toContain("--slot-type 'community-home-before-quicklinks'");
+    expect(script).toContain("'--identifier', 'featured-calendar-event'");
+    expect(packageJson.scripts['manifest:after']).toBe('node scripts/manifest.mjs after');
+    expect(packageJson.scripts['manifest:before']).toBe('node scripts/manifest.mjs before');
+    expect(script).toContain('community-home-${placement}-quicklinks');
   });
 
   it('executes the rebuilt SDK CLI and emits the declared shared-config tag', () => {
     const output = mkdtempSync(join(tmpdir(), 'budabit-calendar-manifest-'));
     const cli = realpathSync(
-      fileURLToPath(new URL('../../node_modules/budabit-sdk/dist/manifest/cli.js', import.meta.url))
+      fileURLToPath(new URL('../../scripts/manifest.mjs', import.meta.url))
     );
 
     try {
       execFileSync(process.execPath, [
         cli,
+        'after',
         '--title',
         'Featured Calendar Events',
         '--type',
@@ -78,6 +79,11 @@ describe('widget manifest scripts', () => {
       ]);
       expect(event.tags).toContainEqual(['d', 'featured-calendar-event']);
       expect(event.tags).toContainEqual(['version', packageJson.version]);
+      expect(event.tags).toContainEqual(['permission', 'profiles:resolve']);
+      expect(event.tags).toContainEqual(['permission', 'ui:openProfile']);
+      expect(event.tags).toContainEqual(['permission', 'nostr:query']);
+      expect(event.tags).toContainEqual(['nostrKinds', '1']);
+      expect(event.tags).toContainEqual(['nostrKinds', '30023']);
     } finally {
       rmSync(output, {recursive: true, force: true});
     }

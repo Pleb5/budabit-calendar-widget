@@ -20,6 +20,9 @@ importers:
       marked:
         specifier: ^17.0.6
         version: 17.0.6
+      nostr-tools:
+        specifier: ^2.23.8
+        version: 2.23.8(typescript@5.9.3)
       svelte:
         specifier: ^5.39.12
         version: 5.56.4

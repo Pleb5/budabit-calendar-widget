@@ -52,6 +52,8 @@
   import {createBoundedPoll} from './lib/boundedPoll';
   import EventDescription from './EventDescription.svelte';
   import {createHostResizer} from './lib/host-resize';
+  import {createDescriptionResolver} from './lib/description-resolver';
+  import {emptyContentState, eventDescription} from './lib/nostr-content';
 
   const CALENDAR_DESCRIPTORS: CommunityEventDescriptor[] = [{kind: EVENT_TIME}, {kind: EVENT_DATE}];
   const CONFIG_NAMESPACE = 'budabit-calendar-widget';
@@ -98,6 +100,8 @@
 
   let bridge = $state<WidgetBridge | null>(null);
   let initPayload = $state<WidgetInitPayload | null>(null);
+  let descriptionState = $state(emptyContentState());
+  let descriptionResolver = $state<ReturnType<typeof createDescriptionResolver> | null>(null);
   let communityContext = $state<CommunityWidgetContext | null>(null);
   let events = $state<NostrEvent[]>([]);
   let config = $state<WidgetConfig>(initialUrlConfig);
@@ -281,7 +285,7 @@
   const getEventTitle = (event: NostrEvent) =>
     tagValue(event, 'title') || tagValue(event, 'name') || 'Untitled event';
 
-  const getEventSummary = (event: NostrEvent) => event.content.trim();
+  const getEventSummary = eventDescription;
 
   const pickerEvents = $derived(
     selectCalendarPickerEvents(
@@ -1189,6 +1193,18 @@
   });
 
   $effect(() => {
+    if (!bridge || !communityContext) return;
+    const resolver = createDescriptionResolver(bridge, communityContext, value => { descriptionState = value; });
+    descriptionState = emptyContentState();
+    descriptionResolver = resolver;
+    return () => { resolver.destroy(); };
+  });
+
+  $effect(() => {
+    descriptionResolver?.update(selectedEvents);
+  });
+
+  $effect(() => {
     let scrollHideTimer: ReturnType<typeof setTimeout> | undefined;
     const markScrolling = () => {
       document.documentElement.classList.add('is-scrolling');
@@ -1339,7 +1355,8 @@
                 <p class="location">{tagValue(featuredEvent, 'location')}</p>
               {/if}
               {#if getEventSummary(featuredEvent)}
-                <EventDescription content={getEventSummary(featuredEvent)} />
+                <EventDescription content={getEventSummary(featuredEvent)} state={descriptionState}
+                  {bridge} context={communityContext} appOrigin={getAppOrigin()} />
               {/if}
             </article>
           {/each}
